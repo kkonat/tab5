@@ -34,6 +34,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $apps = @{
     'launcher' = 'apps\launcher\build\launcher.app.elf'
     'hello'    = 'apps\hello\build\hello.app.elf'
+    'matrix'   = 'apps\matrix\build\matrix.app.elf'
 }
 
 if (-not (Test-Path $Drive)) {
