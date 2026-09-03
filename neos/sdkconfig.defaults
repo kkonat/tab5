@@ -1,0 +1,37 @@
+# --- PSRAM -------------------------------------------------------------
+# Tab5 has 32 MB hex PSRAM. Two things depend on this:
+#   1. The ELF loader executes apps from PSRAM. Without SPIRAM it falls back
+#      to a data-bus address that is not instruction-fetchable and the app
+#      dies with an Instruction access fault.
+#   2. The MIPI-DSI panel scans its framebuffer out of PSRAM. At the default
+#      20 MHz the DSI cannot fetch fast enough -> "underrun happens" spam and
+#      visible flicker at the right edge of the panel.
+# SPIRAM_SPEED_200M depends on IDF_EXPERIMENTAL_FEATURES; without it the
+# choice silently falls back to 20 MHz.
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+
+# --- flash -------------------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# --- ELF loader --------------------------------------------------------
+CONFIG_ELF_LOADER=y
+CONFIG_ELF_LOADER_LOAD_PSRAM=y
+
+# --- FAT ---------------------------------------------------------------
+# Long filenames. Without this "manifest.json" is invisible - a 4-char
+# extension breaks 8.3 and it reads back as MANIFE~1.JSO.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+
+# Scanning + parsing + loading needs more than the 3.5 KB default.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+
+# --- console -----------------------------------------------------------
+# The console is also the upload link, and 115200 makes pushing an app to the
+# card take longer than rebuilding it. Every USB-UART bridge in reach does
+# 921600. idf.py monitor reads this, so it follows automatically.
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=921600

@@ -1,0 +1,31 @@
+# --- ESP-IDF build output ----------------------------------------------
+build/
+sdkconfig.old
+sdkconfig.ci
+dependencies.lock.bak
+
+# Components pulled by the IDF component manager. Reproduced from
+# idf_component.yml + dependencies.lock, both of which are tracked.
+managed_components/
+
+# --- tooling caches ----------------------------------------------------
+.cache/
+compile_commands.json
+.clangd/
+__pycache__/
+*.py[cod]
+
+# --- editors / OS ------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- serial / flash scratch -------------------------------------------
+*.tmp
+
+# --- logs --------------------------------------------------------------
+*.log

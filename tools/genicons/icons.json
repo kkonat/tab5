@@ -1,0 +1,18 @@
+{
+  "_comment": "Font Awesome Free 6.5.2 solid. Icons CC BY 4.0, font SIL OFL 1.1 - redistributable with attribution, unlike the Windows system fonts. Codepoints from fontawesome.com/search?o=r&m=free&s=solid",
+  "font": "tools/genicons/fonts/fa-solid-900.ttf",
+  "sizes": [24, 32],
+  "icons": {
+    "smile":    "0xF118",
+    "dizzy":    "0xF567",
+    "bomb":     "0xF1E2",
+    "close":    "0xF00D",
+    "battery":  "0xF240",
+    "wifi":     "0xF1EB",
+    "settings": "0xF013",
+    "clock":    "0xF017",
+    "folder":   "0xF07B",
+    "home":     "0xF015",
+    "back":     "0xF060"
+  }
+}
