@@ -33,6 +33,7 @@
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 static const char *TAG = "ngl";
 
@@ -75,8 +76,40 @@ static ppa_client_handle_t s_ppa;
 static SemaphoreHandle_t s_lock;
 static ngl_rect_t         s_bar_saved_clip;
 
+/*
+ * The modal overlay.
+ *
+ * s_ov_owner is the whole access-control mechanism: while it is set, a draw is
+ * allowed only from that task. It is read without the lock on every pixel
+ * write, which is why it is a plain handle compared for equality and nothing
+ * more - taking a mutex per pixel would cost more than the drawing.
+ *
+ * Overlays nest, because panels do: the Wi-Fi list puts the keyboard up over
+ * itself to take a password, and has to get its own list back afterwards, not
+ * the app's. Each level saves the screen as it found it, so leaving unwinds to
+ * whatever was underneath that level and nobody has to know how deep they are.
+ * Only the owning task may nest - a second task asking for the screen is a
+ * second panel, and there is only one screen.
+ */
+#define NGL_OVERLAY_DEPTH 3
+
+static TaskHandle_t s_ov_owner;
+static int          s_ov_depth;
+static ngl_rect_t   s_ov_begin_clip;    /* per begin/end pair */
+
+static struct {
+    ngl_color_t *save;                  /* the screen as this level found it */
+    ngl_rect_t   clip;                  /* and the clip it found */
+    int16_t      w, h;
+} s_ov[NGL_OVERLAY_DEPTH];
+
 #define NGL_LOCK()   do { if (s_lock) { xSemaphoreTakeRecursive(s_lock, portMAX_DELAY); } } while (0)
 #define NGL_UNLOCK() do { if (s_lock) { xSemaphoreGiveRecursive(s_lock); } } while (0)
+
+bool ngl_screen_blocked(const ngl_surface_t *s)
+{
+    return s_ov_depth > 0 && s == &s_back && xTaskGetCurrentTaskHandle() != s_ov_owner;
+}
 
 /* ------------------------------------------------------------------ */
 
@@ -154,6 +187,16 @@ ngl_rotation_t ngl_rotation(void)
 void ngl_set_rotation(ngl_rotation_t r)
 {
     if (!s_ready || r == s_rot) {
+        return;
+    }
+    /*
+     * Not while a panel is up. Rotating reallocates the back buffer, which
+     * would strand both the saved pixels underneath the panel and the layout
+     * the panel computed from a screen that is no longer that shape. The
+     * watcher samples on a timer and will offer the same rotation again once
+     * the panel has closed, so nothing is lost by declining this one.
+     */
+    if (s_ov_depth > 0) {
         return;
     }
     const bool was_swapped = (s_rot == NGL_ROT_90 || s_rot == NGL_ROT_270);
@@ -254,6 +297,9 @@ void ngl_bar_paint(void)
     if (!s_ready || s_bar_h <= 0 || !s_bar_painter) {
         return;
     }
+    if (ngl_screen_blocked(&s_back)) {
+        return;
+    }
     const ngl_rect_t bar = ngl_bar_rect();
     const ngl_rect_t saved = s_back.clip;
 
@@ -275,7 +321,7 @@ static int32_t rect_area(const ngl_rect_t *r)
 
 void ngl_dirty(const ngl_rect_t *r)
 {
-    if (!s_ready || !r || ngl_rect_empty(r)) {
+    if (!s_ready || !r || ngl_rect_empty(r) || ngl_screen_blocked(&s_back)) {
         return;
     }
     NGL_LOCK();
@@ -315,7 +361,7 @@ void ngl_dirty(const ngl_rect_t *r)
 
 void ngl_dirty_all(void)
 {
-    if (!s_ready) {
+    if (!s_ready || ngl_screen_blocked(&s_back)) {
         return;
     }
     NGL_LOCK();
@@ -480,5 +526,148 @@ void ngl_bar_end(void)
         return;
     }
     s_back.clip = s_bar_saved_clip;
+    NGL_UNLOCK();
+}
+
+/* ------------------------------------------------------------------ */
+/* Modal overlays                                                      */
+/* ------------------------------------------------------------------ */
+
+bool ngl_overlay_active(void)
+{
+    return s_ov_depth > 0;
+}
+
+bool ngl_overlay_enter(void)
+{
+    if (!s_ready) {
+        return false;
+    }
+    NGL_LOCK();
+
+    if (s_ov_depth > 0 && xTaskGetCurrentTaskHandle() != s_ov_owner) {
+        NGL_UNLOCK();
+        return false;          /* somebody else has the screen */
+    }
+    if (s_ov_depth >= NGL_OVERLAY_DEPTH) {
+        ESP_LOGW(TAG, "%d panels deep already", s_ov_depth);
+        NGL_UNLOCK();
+        return false;
+    }
+
+    /*
+     * The save buffer is the whole logical screen, allocated per level rather
+     * than kept around. A panel is open for seconds at a time and the buffer
+     * is 1.8 MB; holding it for the life of the boot would be paying that
+     * permanently for something used occasionally.
+     */
+    const size_t n = (size_t)s_back.w * s_back.h;
+    ngl_color_t *save = heap_caps_malloc(n * sizeof(ngl_color_t), MALLOC_CAP_SPIRAM);
+    if (!save) {
+        ESP_LOGE(TAG, "no PSRAM to save %dx%d behind a panel", s_back.w, s_back.h);
+        NGL_UNLOCK();
+        return false;
+    }
+    for (int16_t y = 0; y < s_back.h; y++) {
+        memcpy(&save[(size_t)y * s_back.w],
+               &s_back.px[(size_t)y * s_back.stride],
+               (size_t)s_back.w * sizeof(ngl_color_t));
+    }
+
+    s_ov[s_ov_depth].save = save;
+    s_ov[s_ov_depth].clip = s_back.clip;
+    s_ov[s_ov_depth].w    = s_back.w;
+    s_ov[s_ov_depth].h    = s_back.h;
+    s_ov_depth++;
+
+    s_ov_owner = xTaskGetCurrentTaskHandle();
+
+    /* Everyone else is now drawing into an empty clip as well as being refused
+       at the pixel; belt and braces, and it costs nothing. */
+    s_back.clip = ngl_rect(0, 0, 0, 0);
+
+    NGL_UNLOCK();
+    return true;
+}
+
+void ngl_overlay_leave(void)
+{
+    if (!s_ready || s_ov_depth <= 0) {
+        return;
+    }
+    NGL_LOCK();
+
+    const int i = --s_ov_depth;
+
+    if (s_ov[i].save) {
+        /*
+         * Only if the screen is still the shape it was. Rotation is refused
+         * while a panel is up, so the sizes should always match - and if they
+         * ever do not, restoring the wrong pixels is worse than leaving the
+         * panel's own frame up until something draws again.
+         */
+        if (s_ov[i].w == s_back.w && s_ov[i].h == s_back.h) {
+            for (int16_t y = 0; y < s_back.h; y++) {
+                memcpy(&s_back.px[(size_t)y * s_back.stride],
+                       &s_ov[i].save[(size_t)y * s_ov[i].w],
+                       (size_t)s_back.w * sizeof(ngl_color_t));
+            }
+        }
+        heap_caps_free(s_ov[i].save);
+        s_ov[i].save = NULL;
+    }
+
+    s_back.clip = s_ov[i].clip;
+    if (s_ov_depth == 0) {
+        s_ov_owner = NULL;     /* cleared before the flush, so it is allowed */
+    }
+
+    ngl_dirty_all();
+    ngl_flush();
+
+    NGL_UNLOCK();
+}
+
+void ngl_overlay_restore(void)
+{
+    if (!s_ready || s_ov_depth <= 0 || xTaskGetCurrentTaskHandle() != s_ov_owner) {
+        return;
+    }
+    NGL_LOCK();
+    const int i = s_ov_depth - 1;
+    if (s_ov[i].save && s_ov[i].w == s_back.w && s_ov[i].h == s_back.h) {
+        for (int16_t y = 0; y < s_back.h; y++) {
+            memcpy(&s_back.px[(size_t)y * s_back.stride],
+                   &s_ov[i].save[(size_t)y * s_ov[i].w],
+                   (size_t)s_back.w * sizeof(ngl_color_t));
+        }
+        ngl_dirty_all();
+    }
+    NGL_UNLOCK();
+}
+
+ngl_surface_t *ngl_overlay_begin(ngl_rect_t region)
+{
+    if (!s_ready || s_ov_depth <= 0 || xTaskGetCurrentTaskHandle() != s_ov_owner) {
+        return NULL;
+    }
+    NGL_LOCK();
+    s_ov_begin_clip = s_back.clip;
+
+    const ngl_rect_t whole = ngl_rect(0, 0, s_back.w, s_back.h);
+    ngl_rect_t r;
+    if (!ngl_rect_intersect(&region, &whole, &r)) {
+        r = ngl_rect(0, 0, 0, 0);
+    }
+    s_back.clip = r;
+    return &s_back;
+}
+
+void ngl_overlay_end(void)
+{
+    if (!s_ready) {
+        return;
+    }
+    s_back.clip = s_ov_begin_clip;
     NGL_UNLOCK();
 }

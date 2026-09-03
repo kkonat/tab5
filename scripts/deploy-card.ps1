@@ -35,6 +35,8 @@ $apps = @{
     'launcher' = 'apps\launcher\build\launcher.app.elf'
     'hello'    = 'apps\hello\build\hello.app.elf'
     'matrix'   = 'apps\matrix\build\matrix.app.elf'
+    'system'   = 'apps\system\build\system.app.elf'
+    'mandel'   = 'apps\mandel\build\mandel.app.elf'
 }
 
 if (-not (Test-Path $Drive)) {

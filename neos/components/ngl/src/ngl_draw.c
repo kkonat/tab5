@@ -142,6 +142,14 @@ void ngl_surface_free(ngl_surface_t *s)
 
 void ngl_clip_set(ngl_surface_t *s, const ngl_rect_t *r)
 {
+    /* A panel is up and this is not its task: leave the clip alone rather than
+       letting the app hand itself one. Its draws are refused below anyway; the
+       point of not writing here is that the panel's own clip is in this field
+       and an app must not be able to move it mid-frame. */
+    if (ngl_screen_blocked(s)) {
+        return;
+    }
+
     /* On the screen the allowed area excludes the system bar, and no caller
        can widen past it - that is what makes the bar off limits to apps. */
     const ngl_rect_t allowed = (s == ngl_screen())
@@ -162,6 +170,9 @@ void ngl_clip_set(ngl_surface_t *s, const ngl_rect_t *r)
 
 void ngl_pixel(ngl_surface_t *s, int16_t x, int16_t y, ngl_color_t c)
 {
+    if (ngl_screen_blocked(s)) {
+        return;
+    }
     if (ngl_rect_contains(&s->clip, x, y)) {
         s->px[(size_t)y * s->stride + x] = c;
     }
@@ -169,7 +180,7 @@ void ngl_pixel(ngl_surface_t *s, int16_t x, int16_t y, ngl_color_t c)
 
 void ngl_pixel_blend(ngl_surface_t *s, int16_t x, int16_t y, ngl_color_t c, uint8_t a)
 {
-    if (a == 0 || !ngl_rect_contains(&s->clip, x, y)) {
+    if (a == 0 || ngl_screen_blocked(s) || !ngl_rect_contains(&s->clip, x, y)) {
         return;
     }
     if (a == 255) {
@@ -200,7 +211,7 @@ void ngl_pixel_blend(ngl_surface_t *s, int16_t x, int16_t y, ngl_color_t c, uint
 void ngl_fill_rect(ngl_surface_t *s, ngl_rect_t r, ngl_color_t c)
 {
     ngl_rect_t d;
-    if (!ngl_rect_intersect(&r, &s->clip, &d)) {
+    if (ngl_screen_blocked(s) || !ngl_rect_intersect(&r, &s->clip, &d)) {
         return;
     }
     for (int16_t y = d.y; y < d.y + d.h; y++) {
@@ -216,6 +227,16 @@ void ngl_fill_rect(ngl_surface_t *s, ngl_rect_t r, ngl_color_t c)
 
 void ngl_clear(ngl_surface_t *s, ngl_color_t c)
 {
+    /*
+     * The one draw call that ignores the clip - it has to, or an app could
+     * never repaint the bar. So it is also the one that has to be refused
+     * explicitly while a panel is up, since clipping the app to nothing would
+     * not stop this.
+     */
+    if (ngl_screen_blocked(s)) {
+        return;
+    }
+
     const ngl_rect_t whole = ngl_rect(0, 0, s->w, s->h);
 
     if (s != ngl_screen()) {
@@ -471,6 +492,10 @@ static bool blit_setup(ngl_surface_t *dst, int16_t x, int16_t y,
 void ngl_blit(ngl_surface_t *dst, int16_t x, int16_t y,
              const ngl_surface_t *src, const ngl_rect_t *src_rect)
 {
+    if (ngl_screen_blocked(dst)) {
+        return;
+    }
+
     ngl_rect_t sr, dr;
     if (!blit_setup(dst, x, y, src, src_rect, &sr, &dr)) {
         return;
@@ -486,6 +511,10 @@ void ngl_blit(ngl_surface_t *dst, int16_t x, int16_t y,
 void ngl_blit_key(ngl_surface_t *dst, int16_t x, int16_t y,
                  const ngl_surface_t *src, const ngl_rect_t *src_rect, ngl_color_t key)
 {
+    if (ngl_screen_blocked(dst)) {
+        return;
+    }
+
     ngl_rect_t sr, dr;
     if (!blit_setup(dst, x, y, src, src_rect, &sr, &dr)) {
         return;
@@ -500,4 +529,34 @@ void ngl_blit_key(ngl_surface_t *dst, int16_t x, int16_t y,
         }
     }
     if (dst == ngl_screen()) { ngl_dirty(&dr); }
+}
+
+/*
+ * Darken in place.
+ *
+ * Straight into the pixels rather than through ngl_pixel_blend(): a scrim
+ * covers most of the screen, and per-pixel clip tests over 900,000 pixels is
+ * the difference between a panel that appears and one that wipes on.
+ */
+void ngl_dim_rect(ngl_surface_t *s, ngl_rect_t r, uint8_t amount)
+{
+    ngl_rect_t d;
+    if (ngl_screen_blocked(s) || !ngl_rect_intersect(&r, &s->clip, &d)) {
+        return;
+    }
+    const uint32_t keep = 255u - amount;
+
+    for (int16_t y = d.y; y < d.y + d.h; y++) {
+        ngl_color_t *row = &s->px[(size_t)y * s->stride + d.x];
+        for (int16_t x = 0; x < d.w; x++) {
+            const ngl_color_t p = row[x];
+            const uint32_t rr = ((p >> 11) & 0x1F) * keep / 255u;
+            const uint32_t gg = ((p >> 5)  & 0x3F) * keep / 255u;
+            const uint32_t bb = ( p        & 0x1F) * keep / 255u;
+            row[x] = (ngl_color_t)((rr << 11) | (gg << 5) | bb);
+        }
+    }
+    if (s == ngl_screen()) {
+        ngl_dirty(&d);
+    }
 }

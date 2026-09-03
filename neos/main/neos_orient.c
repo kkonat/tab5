@@ -73,6 +73,19 @@ esp_err_t neos_orient_read(float *x, float *y, float *z)
     return err;
 }
 
+esp_err_t neos_orient_read_gyro(float *x, float *y, float *z)
+{
+    if (!s_imu) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    float gx = 0, gy = 0, gz = 0;
+    esp_err_t err = bmi270_get_gyro_data(s_imu, &gx, &gy, &gz);
+    if (x) { *x = gx; }
+    if (y) { *y = gy; }
+    if (z) { *z = gz; }
+    return err;
+}
+
 /*
  * Map gravity to a screen rotation.
  *

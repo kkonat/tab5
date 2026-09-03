@@ -214,6 +214,12 @@ int main(int argc, char **argv)
             seen = now;
             printf("[launcher] card changed, redrawing\n");
             ui_redraw_all();
+            /*
+             * And say so. An upload that replaces an app already on the card
+             * changes nothing on screen, so a list that correctly redrew
+             * identically looks exactly like one that never noticed.
+             */
+            neos_status_for("card changed", 2000);
         }
 
         if (neos_app_close_requested()) {

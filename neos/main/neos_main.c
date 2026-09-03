@@ -23,20 +23,46 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "esp_heap_caps.h"
+#include "esp_private/startup_internal.h"
+
 #include "bsp/m5stack_tab5.h"
 #include "bsp/display.h"
 #include "ngl.h"
 
+#include "neos_audio.h"
 #include "neos_boot.h"
 #include "neos_app.h"
 #include "neos_crash.h"
 #include "neos_orient.h"
 #include "neos_status.h"
 #include "neos_syscalls.h"
+#include "neos_sys.h"
+#include "neos_time.h"
 #include "neos_touch.h"
 #include "neos_upload.h"
 
 static const char *TAG = "neos";
+
+/*
+ * How much internal RAM is left by the time the scheduler starts.
+ *
+ * This runs in the secondary init stage, which is after do_global_ctors() and
+ * before esp_startup_start_app() - the one point where everything that
+ * initialises itself behind the system's back has already done so and nothing
+ * has been scheduled yet. ESP-Hosted brings the whole SDIO transport up from a
+ * C constructor, so this is the only place its cost can be seen.
+ *
+ * It matters because FreeRTOS allocates the idle task's TCB from internal RAM
+ * with an assert, not an error: run out here and the machine panics inside
+ * vTaskStartScheduler with no app having run and nothing to point at.
+ */
+ESP_SYSTEM_INIT_FN(neos_report_early_heap, SECONDARY, BIT(0), 200)
+{
+    ESP_EARLY_LOGI(TAG, "%u B internal RAM left for the scheduler",
+                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    return ESP_OK;
+}
 
 /*
  * Did the last boot end in something an app should be blamed for?
@@ -149,6 +175,22 @@ void app_main(void)
 
         }
     }
+
+    /*
+     * After the display, not before: this is what restores the saved backlight,
+     * and the BSP has to have brought the LEDC channel up before anyone can
+     * set a duty on it. Everything else it touches only needs I2C.
+     */
+    neos_sys_init();
+
+    /*
+     * Both of these read settings neos_sys_init() has just made available, and
+     * one of them needs the RTC it has just probed. The clock is seeded before
+     * anything can ask what time it is; the codec is brought up only if tap
+     * sounds were ever switched on, so on most boots this line does nothing.
+     */
+    neos_time_init();
+    neos_audio_init();
 
     neos_touch_init();
     neos_upload_init();

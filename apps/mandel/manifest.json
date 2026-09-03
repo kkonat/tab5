@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "id": "com.kk.mandel",
+  "name": "Mandel",
+  "description": "fractal viewer - drag a frame to zoom",
+  "version": "0.1.0",
+  "type": "elf",
+  "entry": "app.elf",
+  "icon": "icon.png",
+  "api": 2
+}

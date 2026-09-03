@@ -19,3 +19,14 @@
  * need one, so it uses this instead.
  */
 void ngl_surface_init(ngl_surface_t *s, ngl_color_t *px, int16_t w, int16_t h, int16_t stride);
+
+/**
+ * True when a modal overlay owns the screen and @p s is it, but the calling
+ * task is not the one that took it.
+ *
+ * Every function that writes a pixel asks this first. The check is per task
+ * rather than per surface because the overlay and the app draw into the same
+ * back buffer through the same handle - what separates them is who is asking,
+ * not what they are asking about.
+ */
+bool ngl_screen_blocked(const ngl_surface_t *s);

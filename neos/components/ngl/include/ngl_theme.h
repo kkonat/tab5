@@ -47,3 +47,23 @@
 #define TH_CLOSE_FILL  NGL_RGB(8,   48,  12)    /* dark green                  */
 #define TH_CLOSE_LINE  NGL_RGB(70,  180, 70)    /* rounded-rect outline        */
 #define TH_CLOSE_X     NGL_RGB(160, 255, 130)   /* light green cross           */
+
+/* --- modal panels ------------------------------------------------- */
+/* A panel sits in front of the app rather than instead of it, so what is
+   behind it is dimmed to TH_SCRIM rather than painted over. The panel body is
+   a shade lighter than TH_PANEL so the two read as different depths when one
+   is on top of the other - the Wi-Fi list over the keyboard, say. */
+#define TH_SCRIM       200                      /* how far to darken, 0-255    */
+#define TH_MODAL_BG    NGL_RGB(4,   12,  4)
+#define TH_MODAL_EDGE  NGL_RGB(44,  118, 44)
+
+/* --- keys --------------------------------------------------------- */
+/* Three states, three weights. A plain key is an outline, a held modifier is
+   filled, and a key under a finger is filled brighter still - so which keys
+   are latched is legible at a glance without reading any of the legends. */
+#define TH_KEY_FILL    NGL_RGB(10,  26,  10)
+#define TH_KEY_EDGE    NGL_RGB(30,  84,  30)
+#define TH_KEY_TEXT    NGL_RGB(150, 255, 110)
+#define TH_KEY_DOWN    NGL_RGB(0,   120, 40)    /* under a finger              */
+#define TH_KEY_LATCH   NGL_RGB(12,  64,  20)    /* shift/ctrl/caps held or on  */
+#define TH_KEY_MOD     NGL_RGB(8,   20,  10)    /* modifiers and space, at rest */

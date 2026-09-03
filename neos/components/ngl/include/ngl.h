@@ -246,6 +246,76 @@ ngl_surface_t *ngl_bar_begin(ngl_rect_t region);
 void ngl_bar_end(void);
 
 /* ------------------------------------------------------------------ */
+/* Modal overlays                                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A panel the OS puts over the running app - the keyboard, the Wi-Fi picker,
+ * the clock page.
+ *
+ * NeOS cannot pause an app: it is ordinary code running on the boot task's
+ * stack, and there is no scheduler entry to suspend. So a modal panel takes
+ * the screen instead of the CPU. Between enter and leave, every draw call
+ * from any task other than the one that entered is dropped at the point where
+ * it would touch a pixel - ngl_clear() included, which is the one call that
+ * otherwise bypasses the clip. The app keeps running and keeps computing
+ * frames; none of them arrive.
+ *
+ * The pixels underneath are saved on enter and put back on leave, so the app
+ * comes back to exactly the screen it had. It is never told any of this
+ * happened, which is the point: an app written before there was a keyboard
+ * still works underneath one.
+ *
+ * Not exported to apps. An app that could take the screen from the OS could
+ * take it from the close button too.
+ */
+
+/**
+ * Take the screen.
+ *
+ * Nests, because panels do - the Wi-Fi list raises the keyboard over itself to
+ * take a password, and has to get its own list back and not the app's. Only
+ * the task that took the screen may take it again; anyone else gets false,
+ * which is what stops two panels existing at once.
+ */
+bool ngl_overlay_enter(void);
+
+/** Give it back, restoring whatever this level found underneath it. */
+void ngl_overlay_leave(void);
+
+/**
+ * Put back what this level found, without giving the screen up.
+ *
+ * For a panel that has to redraw itself from scratch - it moved, or the app
+ * area under it changed size. Without this a panel would be compositing onto
+ * its own last frame, and anything it draws by blending, a dimmed backdrop
+ * most of all, would get darker every time it repainted.
+ */
+void ngl_overlay_restore(void);
+
+/** True while a panel owns the screen. */
+bool ngl_overlay_active(void);
+
+/**
+ * Draw into one region of the overlay, in screen coordinates.
+ *
+ * The same shape as ngl_bar_begin(), and for the same reason: it holds the
+ * screen lock until ngl_overlay_end(), so it must be paired and kept short.
+ * Returns NULL unless the calling task is the one that entered.
+ */
+ngl_surface_t *ngl_overlay_begin(ngl_rect_t region);
+void ngl_overlay_end(void);
+
+/**
+ * Darken a region in place, `amount` 0-255.
+ *
+ * What makes a panel read as being in front of something rather than instead
+ * of it. Done as a blend against black rather than a translucent fill so that
+ * whatever is underneath still shows through at full detail.
+ */
+void ngl_dim_rect(ngl_surface_t *s, ngl_rect_t r, uint8_t amount);
+
+/* ------------------------------------------------------------------ */
 /* Surfaces                                                            */
 /* ------------------------------------------------------------------ */
 

@@ -8,8 +8,11 @@
 #include "esp_log.h"
 
 #include "ngl.h"
+#include "neos_net.h"
 #include "neos_orient.h"
 #include "neos_status.h"
+#include "neos_sys.h"
+#include "neos_time.h"
 #include "neos_api.h"
 #include "neos_boot.h"
 #include "neos_touch.h"
@@ -78,7 +81,19 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     /* touch */
     ESP_ELFSYM_EXPORT(neos_touch),
     ESP_ELFSYM_EXPORT(neos_touch_tap),
+    ESP_ELFSYM_EXPORT(neos_touch_points),
     ESP_ELFSYM_EXPORT(ngl_from_panel),
+
+    /*
+     * Text input.
+     *
+     * The keyboard is a system panel and an app never draws one - it asks for
+     * a string and blocks. neos_ui_busy() is the only other half of the story
+     * an app can see, and it is advisory: everything that makes a panel modal
+     * is enforced below this line, not by the app cooperating.
+     */
+    ESP_ELFSYM_EXPORT(neos_input_text),
+    ESP_ELFSYM_EXPORT(neos_ui_busy),
 
     /* Formatting and strings. The loader carries a libc table of its own but
        not these, and every app that draws a number needs them. */
@@ -86,6 +101,14 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     ESP_ELFSYM_EXPORT(vsnprintf),
     ESP_ELFSYM_EXPORT(strcmp),
     ESP_ELFSYM_EXPORT(strlen),
+    /*
+     * memmove is here because the compiler asks for it whether the app does
+     * or not: an overlapping array shift, and sometimes a plain struct copy,
+     * is emitted as a call to it. The loader's table has memcpy and memset
+     * but not this one, so without it an app that never types the name fails
+     * to load - which is a confusing morning.
+     */
+    ESP_ELFSYM_EXPORT(memmove),
 
     /* ngl: screen and surfaces */
     ESP_ELFSYM_EXPORT(ngl_screen),
@@ -108,6 +131,17 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     ESP_ELFSYM_EXPORT(ngl_icon_find),
 
     /* orientation control */
+    /*
+     * neos_orient_read is the raw sensor, and an app wants it for the one
+     * thing lock/get cannot express: pinning the display while still
+     * following gravity. A viewer that must stay landscape has to keep
+     * sensing to know when the tablet has been turned over, but an unlocked
+     * display is one the watcher may rotate to portrait mid-render - which
+     * reallocates the back buffer from another task. Handing over gravity
+     * lets the app lock the panel and decide for itself, at a point in its
+     * own loop where nothing is half-drawn.
+     */
+    ESP_ELFSYM_EXPORT(neos_orient_read),
     ESP_ELFSYM_EXPORT(neos_orient_lock),
     ESP_ELFSYM_EXPORT(neos_orient_unlock),
     ESP_ELFSYM_EXPORT(neos_orient_is_locked),
@@ -148,6 +182,88 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     ESP_ELFSYM_EXPORT(ngl_text_width),
     ESP_ELFSYM_EXPORT(ngl_font_small),
     ESP_ELFSYM_EXPORT(ngl_font_large),
+
+    /* the machine itself */
+    ESP_ELFSYM_EXPORT(neos_chip),
+    ESP_ELFSYM_EXPORT(neos_mac),
+    ESP_ELFSYM_EXPORT(neos_reset_reason),
+    ESP_ELFSYM_EXPORT(neos_idf_version),
+    ESP_ELFSYM_EXPORT(neos_build),
+    ESP_ELFSYM_EXPORT(neos_build_date),
+    ESP_ELFSYM_EXPORT(neos_abi),
+    ESP_ELFSYM_EXPORT(neos_cpu_mhz),
+    ESP_ELFSYM_EXPORT(neos_cores),
+    ESP_ELFSYM_EXPORT(neos_uptime_ms),
+    ESP_ELFSYM_EXPORT(neos_uptime_s),
+    ESP_ELFSYM_EXPORT(neos_heap_free),
+    ESP_ELFSYM_EXPORT(neos_heap_total),
+    ESP_ELFSYM_EXPORT(neos_psram_free),
+    ESP_ELFSYM_EXPORT(neos_psram_total),
+
+    /* sensors */
+    ESP_ELFSYM_EXPORT(neos_imu_accel_mg),
+    ESP_ELFSYM_EXPORT(neos_imu_gyro_dps),
+    ESP_ELFSYM_EXPORT(neos_die_temp_c10),
+    ESP_ELFSYM_EXPORT(neos_rtc_read),
+    ESP_ELFSYM_EXPORT(neos_rtc_set),
+
+    /* the clock, and the zone that turns it into a wall time */
+    ESP_ELFSYM_EXPORT(neos_time_local),
+    ESP_ELFSYM_EXPORT(neos_time_utc),
+    ESP_ELFSYM_EXPORT(neos_time_synced),
+    ESP_ELFSYM_EXPORT(neos_time_since_sync_s),
+    ESP_ELFSYM_EXPORT(neos_time_set_local),
+    ESP_ELFSYM_EXPORT(neos_tz_offset_min),
+    ESP_ELFSYM_EXPORT(neos_tz_offset_set),
+    ESP_ELFSYM_EXPORT(neos_tz_dst),
+    ESP_ELFSYM_EXPORT(neos_tz_dst_set),
+    ESP_ELFSYM_EXPORT(neos_tz_total_min),
+
+    /*
+     * The network, readable but not steerable.
+     *
+     * There is one radio and one set of stored credentials, so associating is
+     * NeOS's job and the Wi-Fi panel is where it happens - see neos_net.h.
+     * What an app gets is everything it needs to show the state and nothing it
+     * needs to change it.
+     */
+    ESP_ELFSYM_EXPORT(neos_net_state),
+    ESP_ELFSYM_EXPORT(neos_net_ssid),
+    ESP_ELFSYM_EXPORT(neos_net_rssi),
+    ESP_ELFSYM_EXPORT(neos_net_ip),
+    ESP_ELFSYM_EXPORT(neos_net_known),
+    ESP_ELFSYM_EXPORT(neos_net_known_count),
+    ESP_ELFSYM_EXPORT(neos_net_scanning),
+    ESP_ELFSYM_EXPORT(neos_net_scan_results),
+
+    /* power */
+    ESP_ELFSYM_EXPORT(neos_power_read),
+    ESP_ELFSYM_EXPORT(neos_power_monitor_addr),
+
+    /* backlight and the rails an app is allowed to switch */
+    ESP_ELFSYM_EXPORT(neos_backlight),
+    ESP_ELFSYM_EXPORT(neos_backlight_set),
+    ESP_ELFSYM_EXPORT(neos_feature),
+    ESP_ELFSYM_EXPORT(neos_feature_set),
+    ESP_ELFSYM_EXPORT(neos_feature_name),
+    ESP_ELFSYM_EXPORT(neos_settings_reset),
+    ESP_ELFSYM_EXPORT(neos_tap_sound),
+    ESP_ELFSYM_EXPORT(neos_tap_sound_set),
+
+    /* the card and the bus it shares the board with */
+    ESP_ELFSYM_EXPORT(neos_sd_mounted),
+    ESP_ELFSYM_EXPORT(neos_sd_bytes),
+    ESP_ELFSYM_EXPORT(neos_sd_name),
+    ESP_ELFSYM_EXPORT(neos_sd_type),
+    ESP_ELFSYM_EXPORT(neos_sd_speed_khz),
+    ESP_ELFSYM_EXPORT(neos_sd_bus_width),
+    ESP_ELFSYM_EXPORT(neos_sd_mount),
+    ESP_ELFSYM_EXPORT(neos_sd_free_bytes),
+    ESP_ELFSYM_EXPORT(neos_i2c_scan),
+    ESP_ELFSYM_EXPORT(neos_i2c_name),
+
+    /* the card, for an app that has something to keep */
+    ESP_ELFSYM_EXPORT(neos_file_write),
 
     /* the boot chain: how one app hands over to the next */
     ESP_ELFSYM_EXPORT(neos_exec),

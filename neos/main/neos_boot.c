@@ -15,9 +15,11 @@
 #include "neos_cfg.h"
 #include "neos_crash.h"
 #include "neos_msg.h"
+#include "neos_net.h"
 #include "neos_orient.h"
 #include "neos_status.h"
 #include "neos_touch.h"
+#include "neos_ui.h"
 
 static const char *TAG = "neos";
 
@@ -84,6 +86,24 @@ static void watch_orientation_for_os(void)
  */
 static void revoke_app_callbacks(void)
 {
+    /*
+     * A panel outlives nothing. The keyboard may be up over an app that has
+     * just been asked to close, or the Wi-Fi list over an app whose card has
+     * been pulled - and a modal panel with no app underneath it is a screen
+     * with the wrong thing behind it and no way to get the right thing back.
+     */
+    neos_ui_close();
+    while (neos_ui_active()) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    /*
+     * An app that pinned the orientation is not necessarily the one that
+     * unpins it - a crash leaves the lock set, and the system would come back
+     * up stuck the way that app wanted it. The lock is process-wide state
+     * held on the app's behalf, so it is released here with the rest.
+     */
+    neos_orient_unlock();
     neos_orient_stop_watch();
     neos_bar_set_closable(false);
     neos_bar_init();          /* an app may have reserved its own */
@@ -267,6 +287,16 @@ static void run_chain(const char *autorun)
 void neos_boot(void)
 {
     neos_bar_init();
+    neos_ui_init();
+
+    /*
+     * After the bar, because the radio reports itself through the status line
+     * and the Wi-Fi icon, and before the card, because a network that is up by
+     * the time the first app draws is a network the first app can use. It
+     * returns at once either way - see neos_net_init().
+     */
+    neos_net_init();
+
     xTaskCreate(card_watch_task, "cardwatch", 3072, NULL, 3, NULL);
     watch_orientation_for_os();
 

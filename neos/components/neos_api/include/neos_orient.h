@@ -21,6 +21,16 @@ esp_err_t neos_orient_init(void);
 esp_err_t neos_orient_read(float *x, float *y, float *z);
 
 /**
+ * Raw gyroscope reading in degrees per second. Any pointer may be NULL.
+ *
+ * Nothing in the orientation logic uses it - which way up the tablet is comes
+ * from gravity alone - but the part is already running at 50 Hz for that, so
+ * the rates are there for the asking and a system readout may as well show
+ * them.
+ */
+esp_err_t neos_orient_read_gyro(float *x, float *y, float *z);
+
+/**
  * Current orientation, as a rotation to apply to the display.
  *
  * When the tablet lies flat, gravity is almost entirely on Z and the in-plane

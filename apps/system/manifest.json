@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "id": "com.kk.system",
+  "name": "System",
+  "description": "readings and switches",
+  "version": "0.1.0",
+  "type": "elf",
+  "entry": "app.elf",
+  "icon": "icon.png",
+  "api": 2
+}

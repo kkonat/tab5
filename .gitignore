@@ -29,3 +29,7 @@ desktop.ini
 
 # --- logs --------------------------------------------------------------
 *.log
+
+# --- generated ---------------------------------------------------------
+# The build number is written into the build tree; build_number.txt is tracked.
+neos_build.h

@@ -42,7 +42,7 @@
 #include <stdint.h>
 
 #define NEOS_ABI_MAJOR 1
-#define NEOS_ABI_MINOR 7
+#define NEOS_ABI_MINOR 12
 
 /*
  * Every minor of the current major, oldest first.
@@ -61,14 +61,19 @@
  * and start at X(2, 0) - which is what invalidates the v1 apps on the card.
  */
 #define NEOS_ABI_GUARDS(X) \
-    X(1, 0)                \
-    X(1, 1)                \
-    X(1, 2)                \
+    X(1, 0)               \
+    X(1, 1)               \
+    X(1, 2)               \
     X(1, 3)               \
     X(1, 4)               \
     X(1, 5)               \
     X(1, 6)               \
-    X(1, 7)
+    X(1, 7)               \
+    X(1, 8)               \
+    X(1, 9)               \
+    X(1, 10)              \
+    X(1, 11)              \
+    X(1, 12)
 
 #define NEOS_ABI_CAT_(maj, min) neos_abi_##maj##_##min
 #define NEOS_ABI_SYM_(maj, min) NEOS_ABI_CAT_(maj, min)

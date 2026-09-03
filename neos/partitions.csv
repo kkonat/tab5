@@ -1,0 +1,19 @@
+# NeOS partition table.
+#
+# The stock single-app table gives a 1 MB app, which was fine until the Wi-Fi
+# host stack arrived - esp_hosted, lwIP and mbedTLS together are more than the
+# whole of NeOS was before them. There is 16 MB of flash and nothing else on it,
+# so the app gets 6 MB and the argument is settled for a long time.
+#
+# NVS is 64 KB rather than the stock 24 KB because it now holds Wi-Fi
+# credentials as well as the machine settings, and an NVS partition that fills
+# up fails writes rather than growing.
+#
+# Changing this moves the app from 0x10000 to 0x20000, so a device coming from
+# an older build has to be flashed with the table and not only the app:
+#   idf.py -p COMx flash
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x10000,
+phy_init,   data, phy,     0x19000,  0x1000,
+factory,    app,  factory, 0x20000,  0x600000,

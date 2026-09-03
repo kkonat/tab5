@@ -1,6 +1,12 @@
 dependencies:
   espressif/elf_loader: "*"
   espressif/m5stack_tab5_noglib: "*"
+  # The P4 has no radio. This is the host half of ESP-Hosted, which puts the
+  # ordinary esp_wifi API over SDIO to the ESP32-C6 on the other side of the
+  # board. Pinned to the 1.x line because 2.x of the slave protocol is what the
+  # factory C6 firmware on this unit speaks, and that firmware cannot be read
+  # back or rebuilt from here - see docs/specs_fingerprint.md.
+  espressif/esp_wifi_remote: "~1.4"
   # The BSP pulls espressif/usb (for the UVC camera). Every 1.x release we can
   # resolve declares idf>=5.4 but calls usb_dwc_hal functions that do not exist
   # until a later IDF, so it will not compile on 5.4.2. Nothing here uses USB,

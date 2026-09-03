@@ -351,3 +351,72 @@ esp_err_t neos_upload_init(void)
     ESP_LOGI(TAG, "listening on USB for " MAGIC "headers");
     return ESP_OK;
 }
+
+/* ------------------------------------------------------------------ */
+/* Writing a file on an app's behalf                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Apps cannot open files, and that is on purpose rather than an oversight:
+ * the loader's libc table has fwrite and fclose but no fopen, so there is no
+ * way for an app to be holding a FILE* when the card is pulled - which is a
+ * thing that happens on this machine, has no warning, and would otherwise
+ * leave a half-written file and a handle pointing at a dead filesystem.
+ *
+ * So the card stays NeOS's, and an app hands over a finished file instead.
+ * One call, one file, opened and closed inside it, with the same two guards
+ * the console upload path uses: the path cannot escape the card, and a write
+ * that fails takes the partial file with it rather than leaving something
+ * that looks saved.
+ */
+int neos_file_write(const char *rel, const void *data, size_t len)
+{
+    if (!rel || (!data && len)) {
+        return -1;
+    }
+    if (!path_is_sane(rel)) {
+        ESP_LOGE(TAG, "app asked to write a path it may not: \"%s\"", rel);
+        return -2;
+    }
+
+    char full[PATH_MAX_REL + sizeof(BSP_SD_MOUNT_POINT) + 2];
+    snprintf(full, sizeof(full), "%s/%s", BSP_SD_MOUNT_POINT, rel);
+    make_parents(full);
+
+    FILE *f = fopen(full, "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "fopen %s: %s", full, strerror(errno));
+        return -3;
+    }
+
+    /*
+     * In blocks, because a megabyte handed to FATFS in one call is a
+     * megabyte during which nothing else on this core runs, and the touch
+     * task is on it.
+     */
+    const uint8_t *p = (const uint8_t *)data;
+    size_t done = 0;
+    while (done < len) {
+        size_t want = len - done;
+        if (want > 16384) {
+            want = 16384;
+        }
+        if (fwrite(p + done, 1, want, f) != want) {
+            ESP_LOGE(TAG, "write %s: %s", full, strerror(errno));
+            fclose(f);
+            unlink(full);
+            return -4;
+        }
+        done += want;
+        taskYIELD();
+    }
+
+    if (fclose(f) != 0) {
+        ESP_LOGE(TAG, "close %s: %s", full, strerror(errno));
+        unlink(full);
+        return -5;
+    }
+
+    ESP_LOGI(TAG, "app wrote %s, %u bytes", full, (unsigned)len);
+    return 0;
+}

@@ -23,8 +23,27 @@ int16_t neos_bar_height(void);
  */
 void neos_bar_set_closable(bool closable);
 
-/** The close button, in screen coordinates. */
-ngl_rect_t neos_bar_close_rect(void);
+/**
+ * What is under (x, y) on the bar, if anything.
+ *
+ * The bar's controls belong to NeOS: the touch driver asks this on every tap
+ * and acts on the answer itself, so an app never sees the gesture that closes
+ * it or the one that opens the Wi-Fi list. The numbers carry no meaning beyond
+ * this file and the switch in neos_touch.c.
+ */
+typedef enum {
+    NEOS_BAR_NONE = 0,
+    NEOS_BAR_CLOSE,
+    NEOS_BAR_WIFI,
+    NEOS_BAR_CLOCK,
+} neos_bar_hit_t;
 
-/** True if (x, y) is on the close button and the button is showing. */
-bool neos_bar_hit_close(int16_t x, int16_t y);
+neos_bar_hit_t neos_bar_hit(int16_t x, int16_t y);
+
+/**
+ * Repaint the Wi-Fi icon and the clock if either has moved.
+ *
+ * Called on a timer from inside the bar, and by anything that has just changed
+ * the network on purpose and does not want to wait a second to see it.
+ */
+void neos_bar_widgets_refresh(void);

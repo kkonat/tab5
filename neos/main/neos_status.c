@@ -98,6 +98,15 @@ static void relayout_locked(void)
 
 static void set_message(const char *msg, uint32_t ms)
 {
+    /*
+     * Messages can arrive before the bar does. The Wi-Fi bring-up is on its
+     * own task and will happily report a network before neos_status_init()
+     * has run on a slow boot, and a status line is never important enough to
+     * be the thing that crashes the machine.
+     */
+    if (!s_lock) {
+        return;
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
 
     if (msg && msg[0]) {
@@ -190,6 +199,9 @@ void neos_status_paint(void)
 
 void neos_status_progress(int percent)
 {
+    if (!s_lock) {
+        return;
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (percent < 0) {
         s_progress = -1;

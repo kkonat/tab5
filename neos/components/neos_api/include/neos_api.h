@@ -65,6 +65,29 @@ bool neos_app_close_requested(void);
 const char *neos_app_self(void);
 
 /* ------------------------------------------------------------------ */
+/* The card                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Write a whole file to the card.
+ *
+ * @param rel   path relative to the card root, e.g. "album/mandel.png".
+ *              Missing directories along it are created. It may not begin
+ *              with '/' or contain "..", so an app cannot write outside the
+ *              card however it was asked to.
+ * @param data  the finished file
+ * @param len   its length
+ * @return 0 on success, negative on failure. Nothing is left behind on
+ *         failure - a partial file is deleted rather than kept.
+ *
+ * One call per file, and no handle crosses the boundary. There is no
+ * neos_file_open on purpose: the card can be pulled at any moment on this
+ * machine, and an app holding an open FILE* across that is a half-written
+ * file plus a handle into a dead filesystem. NeOS keeps the card.
+ */
+int neos_file_write(const char *rel, const void *data, size_t len);
+
+/* ------------------------------------------------------------------ */
 /* Touch                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -87,10 +110,69 @@ bool neos_touch(neos_touch_t *out);
  * detection so that every app agrees on what a tap is, and delivers each one
  * exactly once - the second caller gets false.
  *
- * A tap in the top corner never arrives here: that one is reserved as the
- * way to close the running app, since only the shell draws a system bar.
+ * A tap on the system bar never arrives here: those belong to NeOS - the close
+ * button, the Wi-Fi icon, the clock - and are consumed before an app can see
+ * them, let alone swallow them.
  */
 bool neos_touch_tap(int16_t *x, int16_t *y);
+
+/** How many fingers NeOS tracks at once. */
+#define NEOS_TOUCH_MAX 5
+
+/**
+ * Every finger on the glass, in screen coordinates.
+ *
+ * Returns the number touching, which may exceed @p max - the array fills to
+ * max and the count is still the truth, the same convention as
+ * neos_i2c_scan(). Each point that is written has `down` set; a finger that is
+ * not there does not appear, so there are no gaps to skip.
+ *
+ * Order is whatever the controller reports and is not a finger identity: a
+ * point does not stay at the same index across calls, and lifting one finger
+ * can renumber the rest. An app that wants to know a particular contact has
+ * moved has to match by position itself.
+ */
+int neos_touch_points(neos_touch_t *out, int max);
+
+/* ------------------------------------------------------------------ */
+/* Text input                                                          */
+/* ------------------------------------------------------------------ */
+
+/** Mask the field and do not echo what is typed. For passwords. */
+#define NEOS_INPUT_SECRET  0x01u
+
+/**
+ * Put the system keyboard up and wait for a line of text.
+ *
+ * Blocking, and blocking is the feature. The app stops inside this call, which
+ * is what makes the keyboard modal without NeOS having to suspend anything:
+ * one app is resident and it is the one that stopped, so nothing else is
+ * drawing. What was on screen is saved before the keyboard appears and put
+ * back before this returns, so an app gets its own frame back and never has to
+ * know a panel was over it.
+ *
+ * @param title  what the field is for, shown above it. May be NULL.
+ * @param buf    seeded with the current value and overwritten with the new
+ *               one. Left untouched if the user cancels.
+ * @param size   sizeof(buf), including the terminator.
+ * @param flags  NEOS_INPUT_* or zero.
+ *
+ * @return true if the user confirmed, false if they cancelled or the keyboard
+ *         could not open. False means @p buf still holds what it did.
+ */
+bool neos_input_text(const char *title, char *buf, size_t size, uint32_t flags);
+
+/**
+ * True while a system panel - the keyboard, the Wi-Fi list, the clock page -
+ * is over the app.
+ *
+ * An app does not need this to be correct: its draws are dropped and its taps
+ * withheld for the duration either way. It is here so that an app which is
+ * doing something expensive per frame can stop doing it at something nobody
+ * can see, and so that one which measures its own frame rate does not report a
+ * stall it did not cause.
+ */
+bool neos_ui_busy(void);
 
 /* ------------------------------------------------------------------ */
 /* The app registry                                                    */
