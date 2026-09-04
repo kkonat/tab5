@@ -8,16 +8,14 @@ path; scripts/deploy-card.ps1 is still the way to seed a card from scratch or
 to fix one whose firmware will not boot.
 
     # an app: goes to /apps/<name>/, named by its manifest's "entry"
-    python scripts/upload.py --app hello
+    ./do upload --app hello
 
     # any single file, path relative to the root of the card
-    python scripts/upload.py --file autorun.cfg
-    python scripts/upload.py --file some/local/icon.png --as apps/hello/icon.png
+    ./do upload --file autorun.cfg
+    ./do upload --file some/local/icon.png --as apps/hello/icon.png
 
-Needs pyserial. The ESP-IDF virtualenv has it:
-
-    C:/ESP-IDF/.espressif/python_env/idf5.4_py3.11_env/Scripts/python.exe \
-        scripts/upload.py --app hello
+From PowerShell that is "do.ps1 upload". The wrapper is what finds the ESP-IDF
+virtualenv, which is the python that has pyserial.
 """
 import argparse
 import json
@@ -26,12 +24,15 @@ import sys
 import time
 import zlib
 
+import _env
+
 try:
     import serial
 except ImportError:
-    sys.exit("pyserial is missing - run this with the ESP-IDF python (see the docstring)")
+    sys.exit("pyserial is missing - run this through the wrapper, which picks the "
+             "interpreter: ./do upload ... (do.ps1 upload ... on PowerShell)")
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = _env.REPO
 
 MAGIC = b"@NEOSPUT "
 MAGIC_DEL = b"@NEOSDEL "
@@ -169,7 +170,7 @@ def delete(port_name, remote):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--port", default="COM16", help="serial port (default COM16)")
+    _env.add_port_argument(ap)
     ap.add_argument("--app", help="app directory under apps/ - uploads its built ELF and manifest")
     ap.add_argument("--file", help="a local file to upload")
     ap.add_argument("--as", dest="remote", help="path on the card (default: the file's own name)")
@@ -180,6 +181,10 @@ def main():
 
     if not any((args.app, args.file, args.rm, args.rm_app)):
         ap.error("give --app, --file, --rm or --rm-app")
+
+    # Resolved once, after the argument check: finding the board is worth
+    # nothing if the command line was not going to do anything anyway.
+    args.port = _env.port(args.port)
 
     if args.rm_app:
         delete(args.port, "apps/%s" % args.rm_app)

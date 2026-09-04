@@ -443,6 +443,6 @@ direct_dependencies:
 - espressif/esp_wifi_remote
 - espressif/m5stack_tab5_noglib
 - espressif/usb
-manifest_hash: 835383fab9c1626e384575e77851267ef324ce30b3d95fa0746785501a917a8a
+manifest_hash: 684f8f56e08c387dad042095186128c684087d15132d363e95c2a1775d34bae4
 target: esp32p4
 version: 2.0.0

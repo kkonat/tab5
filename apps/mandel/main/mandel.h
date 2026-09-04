@@ -207,6 +207,14 @@ float    rnd_unit(void);        /* [0,1) */
  * different machine.
  */
 extern ngl_color_t g_pal[256];
+/*
+ * The same 256 colours before RGB565 threw four fifths of them away, and the
+ * 8x8 threshold that puts them back. See the note over g_bayer8 in palette.c:
+ * everything that draws a pixel of the fractal goes through pal_px, and only
+ * flat fills use g_pal directly.
+ */
+extern uint8_t       g_pal8[256][3];
+extern const uint8_t g_bayer8[64];
 extern float       g_pal_k;         /* value -> position in the cycle */
 extern float       g_pal_phase;     /* where the cycle starts */
 
@@ -231,6 +239,39 @@ static inline uint8_t pal_shade(float v)
     }
     const int i = (int)(fsqrt_(v) * g_pal_k + g_pal_phase) & 255;
     return i ? (uint8_t)i : 1;      /* 0 belongs to the interior */
+}
+
+/**
+ * Pack 8-bit RGB into RGB565 with the ordered dither for this pixel.
+ *
+ * The threshold is the fraction of a 565 step that this cell stands for: the
+ * red and blue steps are 8 apart in eight-bit terms and green's are 4, so the
+ * 0..63 matrix entry is scaled by 1/8 and 1/16 respectively. A colour that
+ * sits three quarters of the way between two representable values therefore
+ * rounds up in three cells out of four, and the eye averages the cell back to
+ * the colour that was asked for.
+ */
+static inline ngl_color_t pal_mix(int r, int g, int b, int x, int y)
+{
+    const int d = g_bayer8[((y & 7) << 3) | (x & 7)];
+    r += d >> 3;
+    g += d >> 4;
+    b += d >> 3;
+    if (r > 255) { r = 255; }
+    if (g > 255) { g = 255; }
+    if (b > 255) { b = 255; }
+    return NGL_RGB(r, g, b);
+}
+
+/** A palette entry as this pixel should be drawn. */
+static inline ngl_color_t pal_px(uint8_t s, int x, int y)
+{
+    /* The interior is one flat colour and is meant to read as a shape rather
+       than a gradient, so it is the one thing here that is not dithered. */
+    if (!s) {
+        return g_pal[0];
+    }
+    return pal_mix(g_pal8[s][0], g_pal8[s][1], g_pal8[s][2], x, y);
 }
 
 /* ------------------------------------------------------------------ save.c */

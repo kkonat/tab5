@@ -11,7 +11,13 @@
  *                  view's coordinates in it so it can be drawn again
  *   PALETTE        the same picture, a new green
  *   PLACE          somewhere worth looking in this fractal, found by measuring
+ *   PLACE, held    all the way back out to the whole of it
  *   MODE           the next fractal, framed whole
+ *
+ * Untouched, it runs itself: it opens on somewhere the search found, draws the
+ * next one on the other core while you look at this one, and dissolves across
+ * when it is ready. The first touch ends that for good and hands over whatever
+ * is on the glass. See "the attract loop" below.
  *
  * The greenbox original had two buttons and therefore no navigation at all -
  * it searched for a good view and showed it to you, which was the right
@@ -36,6 +42,12 @@
  * sample is taken exactly once - the interlace costs nothing over a straight
  * top-to-bottom raster - but the screen reaches full horizontal resolution
  * after a quarter of the work rather than a quarter of the way down.
+ *
+ * Every pixel of every pass is ordered-dithered on its way into RGB565, which
+ * is where the bands in a gradient this smooth actually come from - see the
+ * note over g_bayer8 in palette.c. It costs an add and a table lookup next to
+ * a few hundred iterations, and it is the difference between open water that
+ * is a gradient and open water that is a contour map.
  *
  * The REFINE pass goes back over the pixels where the picture steps between
  * neighbours - the fringe beside a filament, the edge of the set - and
@@ -86,6 +98,7 @@
 #include "neos_api.h"
 #include "neos_orient.h"
 #include "neos_status.h"
+#include "neos_sys.h"       /* neos_psram_free, for the note about the buffers */
 
 #include "mandel.h"
 
@@ -117,11 +130,42 @@ static int        s_cgw, s_cgh;         /* the coarse grid, in cells */
  * these two pixels differ by more than five palette steps" means the same
  * thing at every zoom, in every mode, under every palette.
  */
+typedef struct {
+    ngl_color_t   *pic;
+    ngl_surface_t *pics;
+    uint8_t       *idx;
+    void          *pic_raw, *idx_raw;
+} pbuf_t;
+
+/*
+ * Two of them, because the attract loop draws the next picture while the last
+ * one is still on the panel and then dissolves between the two.
+ *
+ * s_vis is the buffer the panel is showing; s_tgt is the one the passes are
+ * writing into. They are the same number for everything a finger does - a
+ * zoom draws over what it replaces, as it always did - and differ only while
+ * a picture is being made ahead of time. Buffer 1 is optional: without the
+ * room for it the program is exactly what it was, minus the attract loop.
+ */
+static pbuf_t s_buf[2];
+static int    s_vis;
+static int    s_tgt;
+
+/* Aliases for s_buf[s_tgt], because every pass in this file writes through
+   them and threading an index through all of it would earn nothing. */
 static ngl_color_t   *s_pic;
 static ngl_surface_t *s_pics;
 static uint8_t       *s_idx;
+
 static float         *s_cv;             /* the coarse grid's values */
-static void          *s_pic_raw, *s_idx_raw;
+
+static void target_set(int i)
+{
+    s_tgt  = i;
+    s_pic  = s_buf[i].pic;
+    s_pics = s_buf[i].pics;
+    s_idx  = s_buf[i].idx;
+}
 
 static inline ngl_color_t *pic_row(int y) { return s_pic + (size_t)y * s_pw; }
 static inline uint8_t     *idx_row(int y) { return s_idx ? s_idx + (size_t)y * s_pw : NULL; }
@@ -132,10 +176,21 @@ static inline uint8_t     *idx_row(int y) { return s_idx ? s_idx + (size_t)y * s
 
 static scene_t g_scene;
 
+/*
+ * The scene the panel is showing, which is g_scene except while the next one
+ * is being drawn ahead of time. The readout at the bottom is about this one,
+ * and so is everything the user gets back if they take over mid-render.
+ */
+static scene_t s_shown;
+
 #define HIST_MAX 24
 static scene_t s_hist[HIST_MAX];
 static int     s_nhist;
 static int     s_pal_no = 1;
+
+/* The attract loop's state; the section near the bottom is what drives it. */
+enum { AT_OFF = 0, AT_SHOW, AT_MAKE, AT_FADE };
+static uint8_t s_at;
 
 enum { RP_COARSE = 0, RP_MAP, RP_ROWS, RP_REFINE, RP_DONE };
 static uint8_t  s_rp = RP_DONE;
@@ -180,10 +235,29 @@ static volatile int8_t  s_w_kind;
 static volatile int8_t  s_w_res;        /* WK_REFINE: did the row change */
 static volatile int8_t  s_w_quit;
 static volatile int8_t  s_w_pause;
+/*
+ * Whether there is a render on at all. Spinning is the right way to wait
+ * microseconds for the next row and quite the wrong way to sit out a
+ * minute of somebody looking at a finished picture, and only the main loop
+ * knows which of the two is happening.
+ */
+static volatile int8_t  s_w_busy;
 
 static pthread_t s_w_thread;
-static bool      s_w_ok;        /* use it for work */
-static bool      s_w_started;   /* it exists, and must be joined */
+static bool      s_w_ok;        /* hand it rows */
+/*
+ * A thread exists and has to be joined before this image is unloaded.
+ *
+ * Separate from s_w_ok because the two answer different questions - a
+ * worker that stopped answering is no longer worth giving rows to but is
+ * emphatically still running - and set in exactly one place, next to the
+ * pthread_create it describes. This was two flags set in two places once,
+ * the second of them never actually set, so nothing was ever joined and
+ * the thread outlived the app: the whole machine went sluggish after
+ * mandel had been and gone, because a priority 5 spinner was still on a
+ * core, in an ELF image that had been freed underneath it.
+ */
+static bool      s_w_live;
 
 static void row_compute(int y);
 static bool row_refine(int y, uint32_t *count);
@@ -223,8 +297,15 @@ static void *worker_main(void *arg)
          * about to block too, which is the only moment both cores are free to
          * run anything else.
          */
-        if (s_w_pause || ++spins > 400000) {
-            neos_sleep_ms(1);
+        /*
+         * Ten, not one. The tick is 100 Hz, so pdMS_TO_TICKS(1) rounds to
+         * zero ticks and vTaskDelay(0) yields to equals without ever
+         * leaving the ready list - which for a priority 5 task means the
+         * idle task below it never runs. Asking for a millisecond here was
+         * asking for nothing at all, and this thread simply spun.
+         */
+        if (!s_w_busy || s_w_pause || ++spins > 400000) {
+            neos_sleep_ms(10);
             spins = 0;
         }
     }
@@ -240,7 +321,8 @@ static void worker_start(void)
     /* The render path is a handful of floats and no recursion; the default
        3 KB would do, and 8 KB costs nothing worth counting. */
     pthread_attr_setstacksize(&attr, 8192);
-    s_w_ok = pthread_create(&s_w_thread, &attr, worker_main, NULL) == 0;
+    s_w_live = pthread_create(&s_w_thread, &attr, worker_main, NULL) == 0;
+    s_w_ok   = s_w_live;
     printf("[mandel] second core: %s\n", s_w_ok ? "yes" : "no, running alone");
 }
 
@@ -252,15 +334,14 @@ static void worker_start(void)
  */
 static void worker_stop(void)
 {
-    /* s_w_started, not s_w_ok: a worker this run gave up waiting for is one
-       that is still running, and it is exactly the one that must be joined. */
-    if (!s_w_started) {
+    if (!s_w_live) {
         return;
     }
+    s_w_ok   = false;           /* no more rows, whatever else happens */
     s_w_quit = 1;
     pthread_join(s_w_thread, NULL);
-    s_w_started = false;
-    s_w_ok = false;
+    s_w_live = false;
+    printf("[mandel] worker joined\n");
 }
 
 static void w_submit(int kind, int y)
@@ -290,7 +371,7 @@ static bool w_wait(void)
     while (s_w_ack != s_w_seq) {
         if (++spins > 2000000u) {
             spins = 0;
-            neos_sleep_ms(1);
+            neos_sleep_ms(10);      /* a real block; see the note in worker_main */
             if (++late > 100) {
                 printf("[mandel] worker stopped answering, going it alone\n");
                 s_w_ok = false;
@@ -301,6 +382,37 @@ static bool w_wait(void)
     late = 0;
     __sync_synchronize();
     return true;
+}
+
+/*
+ * Both cores off the buffers, and stay off.
+ *
+ * The dissolve reads the two pictures and writes a band of scratch, all from
+ * this thread. Handing half the rows to the worker was worth about a third of
+ * a frame and cost the correctness of the whole thing: the band's origin is
+ * one shared int, so any row the worker was late finishing landed at an
+ * offset measured from the *next* band - off the end of a 32-row buffer, with
+ * the row it should have written left holding the last band's colours. That
+ * is what the bright bands flashing through the fade were, and the stall in
+ * front of them was w_wait spending its full second deciding the worker had
+ * stopped answering.
+ *
+ * So the fade does not submit rows, and this makes sure nothing else is
+ * outstanding either: anything already given out is waited for, and then the
+ * thread is held in its blocking branch until the picture has changed hands.
+ */
+static void worker_park(void)
+{
+    if (s_w_live && s_w_ok && s_w_ack != s_w_seq) {
+        w_wait();
+    }
+    s_w_busy  = 0;
+    s_w_pause = 1;
+}
+
+static void worker_unpark(void)
+{
+    s_w_pause = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -328,6 +440,9 @@ static void blit_band(int y, int h)
     if (!sc || h <= 0) {
         return;
     }
+    if (s_tgt != s_vis) {
+        return;             /* drawing ahead: this picture is not on the panel yet */
+    }
     if (y + h > s_ph) {
         h = s_ph - y;
     }
@@ -350,7 +465,7 @@ static void row_compute(int y)
 
     for (int x = 0; x < s_pw; x++) {
         const uint8_t s = pal_shade(fr_at(x, y));
-        pr[x] = g_pal[s];
+        pr[x] = pal_px(s, x, y);
         if (ir) {
             ir[x] = s;
         }
@@ -373,24 +488,24 @@ static void row_compute(int y)
  * divide by six is a multiply - 171/1024 is within a part in five hundred,
  * and this runs on every refined pixel.
  */
-static ngl_color_t ss_colour(int x, int y, ngl_color_t base)
+static ngl_color_t ss_colour(int x, int y, uint8_t base)
 {
     float v[4];
     fr_at_ss4(x, y, v);
 
-    int r = 2 * ((base >> 11) & 31);
-    int g = 2 * ((base >>  5) & 63);
-    int b = 2 * ( base        & 31);
+    int r = 2 * g_pal8[base][0];
+    int g = 2 * g_pal8[base][1];
+    int b = 2 * g_pal8[base][2];
 
     for (int i = 0; i < 4; i++) {
-        const ngl_color_t c = g_pal[pal_shade(v[i])];
-        r += (c >> 11) & 31;
-        g += (c >>  5) & 63;
-        b +=  c        & 31;
+        const uint8_t c = pal_shade(v[i]);
+        r += g_pal8[c][0];
+        g += g_pal8[c][1];
+        b += g_pal8[c][2];
     }
-    return (ngl_color_t)((((r * 171) >> 10) << 11) |
-                         (((g * 171) >> 10) <<  5) |
-                          ((b * 171) >> 10));
+    /* The average is in eight bits, so it lands between two representable
+       565 values as often as anything else does and wants the same dither. */
+    return pal_mix((r * 171) >> 10, (g * 171) >> 10, (b * 171) >> 10, x, y);
 }
 
 /*
@@ -420,7 +535,7 @@ static bool row_refine(int y, uint32_t *count)
             (x + 1 < s_pw && fr_jump(s, me[x + 1])) ||
             (up           && fr_jump(s, up[x]))     ||
             (dn           && fr_jump(s, dn[x]))) {
-            pr[x] = ss_colour(x, y, g_pal[s]);
+            pr[x] = ss_colour(x, y, s);
             changed = true;
             (*count)++;
         }
@@ -654,7 +769,7 @@ static void maybe_yield(void)
     ngl_flush();
 
     s_w_pause = 1;
-    neos_sleep_ms(1);
+    neos_sleep_ms(10);
     s_w_pause = 0;
 }
 
@@ -758,23 +873,27 @@ void zoom_text(char *buf, size_t n, uint8_t mode, float hw)
 
 static void status_str(char *buf, size_t n)
 {
+    /* s_shown, not g_scene: while the next picture is being drawn ahead of
+       time g_scene is already that one, and a readout describing a view
+       nobody can see yet is just wrong. */
+    const scene_t *sc = &s_shown;
     char z[16];
-    zoom_text(z, sizeof z, g_scene.mode, g_scene.hw);
+    zoom_text(z, sizeof z, sc->mode, sc->hw);
 
-    switch (g_scene.mode) {
+    switch (sc->mode) {
     case MODE_LYAP: {
         char w[SEQ_MAX + 1];
-        int len = g_scene.seq_len > SEQ_MAX ? SEQ_MAX : g_scene.seq_len;
+        int len = sc->seq_len > SEQ_MAX ? SEQ_MAX : sc->seq_len;
         for (int i = 0; i < len; i++) {
-            w[i] = (char)('a' + (g_scene.seq[i] & 1));
+            w[i] = (char)('a' + (sc->seq[i] & 1));
         }
         w[len] = 0;
         snprintf(buf, n, "lyapunov %s  %s", w, z);
         break;
     }
     default:
-        snprintf(buf, n, "%s  %s  %u it", mode_name(g_scene.mode), z,
-                 (unsigned)g_scene.maxiter);
+        snprintf(buf, n, "%s  %s  %u it", mode_name(sc->mode), z,
+                 (unsigned)sc->maxiter);
         break;
     }
 }
@@ -817,7 +936,12 @@ static void prog_paint(void)
     const int16_t y = (int16_t)(s_area.y + s_ph - PROG_H);
 
     if (s_rp == RP_DONE) {
-        restore(ngl_rect(s_area.x, y, (int16_t)s_pw, PROG_H));
+        /* Mid-dissolve there is no buffer this strip can be put back from -
+           the panel is showing a blend of two - so it is left as the fade
+           drew it, which is the only thing there that is not stale. */
+        if (s_at != AT_FADE) {
+            restore(ngl_rect(s_area.x, y, (int16_t)s_pw, PROG_H));
+        }
         return;
     }
     int16_t w = (int16_t)((float)s_pw * progress());
@@ -844,13 +968,16 @@ static void ui_paint(void)
 /** Put back whatever an overlay covered, from the kept picture. */
 static void restore(ngl_rect_t r)
 {
-    ngl_surface_t *sc = ngl_screen();
+    ngl_surface_t *sc  = ngl_screen();
+    ngl_surface_t *vis = s_buf[s_vis].pics;
     ngl_rect_t out;
-    if (!sc || !s_pics || !ngl_rect_intersect(&r, &s_area, &out)) {
+    /* The visible buffer, not the target: what an overlay covered is what is
+       on the panel, which during a background render is the previous picture. */
+    if (!sc || !vis || !ngl_rect_intersect(&r, &s_area, &out)) {
         return;
     }
     const ngl_rect_t src = ngl_rect(out.x, (int16_t)(out.y - s_area.y), out.w, out.h);
-    ngl_blit(sc, out.x, out.y, s_pics, &src);
+    ngl_blit(sc, out.x, out.y, vis, &src);
 }
 
 /* ------------------------------------------------------------------ */
@@ -960,16 +1087,31 @@ static ngl_rect_t band_rect(int x0, int y0, int x1, int y1)
 #define SLOP     18     /* a finger rolls this far on a press meant as a tap */
 #define BAND_MIN 40     /* a frame smaller than this was a tap that wandered */
 #define TAP_ZOOM 3.0f
+/*
+ * A press held this long is a different press.
+ *
+ * Long enough that nobody reaches it by being slow with a tap, short enough
+ * that it fires while the finger is still down - which is the point: the
+ * action happens under the finger, so the gesture explains itself, and the
+ * release afterwards is thrown away rather than doing the short press too.
+ */
+#define LONG_MS  650
 
-enum { ACT_NONE = 0, ACT_BUSY, ACT_ZOOM_RECT, ACT_ZOOM_PT, ACT_BTN };
+enum { ACT_NONE = 0, ACT_BUSY, ACT_ZOOM_RECT, ACT_ZOOM_PT, ACT_BTN, ACT_BTN_LONG };
 enum { G_IDLE = 0, G_PRESS, G_DRAG, G_BTN, G_DEAD };
 
 static int8_t     s_g;
 static bool       s_down_prev;
 static int16_t    s_gx0, s_gy0;
+static uint32_t   s_gt0;            /* when the press went down */
 static ngl_rect_t s_act_rect;
 static int16_t    s_act_x, s_act_y;
 static int        s_act_btn;
+
+static void attract_stop(void);
+
+/* Which buttons mean something different held down. Only one, so far. */
+static bool btn_has_long(int b) { return b == BTN_PLACE; }
 
 static int btn_hit(int16_t x, int16_t y)
 {
@@ -1001,11 +1143,28 @@ static int gesture_poll(void)
         return ACT_NONE;                /* no touch panel: the app still draws */
     }
 
+    /*
+     * The touch that ends the attract loop does nothing else. Waking a
+     * screensaver by accidentally zooming into a corner of it is the one
+     * thing worse than not being able to wake it at all, so the whole
+     * gesture - press, drag and release - is swallowed.
+     */
+    if (s_at != AT_OFF) {
+        if (t.down || s_down_prev) {
+            attract_stop();
+            s_g = G_DEAD;
+            s_down_prev = t.down;
+            return t.down ? ACT_BUSY : ACT_NONE;
+        }
+        return ACT_NONE;
+    }
+
     int act = ACT_NONE;
 
     if (t.down && !s_down_prev) {
         s_gx0 = t.x;
         s_gy0 = t.y;
+        s_gt0 = now_ms();
         if (!ngl_rect_contains(&s_area, t.x, t.y)) {
             s_g = G_DEAD;               /* the system bar is not ours */
         } else {
@@ -1023,6 +1182,11 @@ static int gesture_poll(void)
         if (s_g == G_BTN && moved) {
             btn_light(s_act_btn, false);
             s_g = G_DEAD;               /* slid off the button: not a press */
+        } else if (s_g == G_BTN && btn_has_long(s_act_btn) &&
+                   now_ms() - s_gt0 >= LONG_MS) {
+            btn_light(s_act_btn, false);
+            s_g = G_DEAD;               /* fired; the release is not a tap */
+            act = ACT_BTN_LONG;
         } else if (s_g == G_PRESS && moved) {
             s_g = G_DRAG;
         }
@@ -1096,7 +1260,12 @@ static void restart(void)
     s_pend_rows = 0;
     s_pend_ui   = false;
 
-    ui_paint();                 /* the readout is about this view from now on */
+    /* Unless this render is going into the buffer the panel is not showing,
+       the readout is about this view from now on. */
+    if (s_tgt == s_vis) {
+        s_shown = g_scene;
+    }
+    ui_paint();
     ngl_flush();
 }
 
@@ -1173,6 +1342,37 @@ static void zoom_out(void)
 }
 
 /*
+ * All the way out, in one press, without walking back through the history.
+ *
+ * PLACE held down rather than tapped, because the two are the same question
+ * asked at two scales - "put me somewhere in this fractal" and "put me back
+ * where the whole of it is" - and a sixth chip along the bottom to say so
+ * would be a sixth chip nobody looks at. The fractal itself is kept: a Julia
+ * set framed whole is still that Julia set, which is what fr_home_view is for
+ * and what fr_home would have thrown away.
+ *
+ * It pushes history like any other move, so ZOOM OUT still comes back to the
+ * view this was pressed from.
+ */
+static void zoom_home(void)
+{
+    float cx, cy, hw;
+    fr_home_view(g_scene.mode, &cx, &cy, &hw);
+
+    if (g_scene.hw >= hw) {
+        neos_status_for("this is the whole of it", 1600);
+        return;
+    }
+    hist_push();
+    g_scene.cx      = cx;
+    g_scene.cy      = cy;
+    g_scene.hw      = hw;
+    g_scene.maxiter = fr_iters_for(g_scene.mode, hw);
+    restart();
+    neos_status_for("all the way out", 1600);
+}
+
+/*
  * A new palette over the same picture, which is a lookup rather than a
  * render - as long as there is a picture. Mid-render the indices below the
  * wavefront are for the old view, so the honest answer is to draw it again.
@@ -1194,7 +1394,7 @@ static void new_palette(void)
         ngl_color_t   *pr = pic_row(y);
         const uint8_t *ir = idx_row(y);
         for (int x = 0; x < s_pw; x++) {
-            pr[x] = g_pal[ir[x]];
+            pr[x] = pal_px(ir[x], x, y);
         }
     }
     blit_band(0, s_ph);
@@ -1239,6 +1439,230 @@ static void next_mode(void)
     fr_home(m, &g_scene);
     restart();
     neos_status_for(mode_name(m), 1800);
+}
+
+/* ------------------------------------------------------------------ */
+/* The attract loop                                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * What the program does when nobody is steering it.
+ *
+ * It opens on somewhere the search picked rather than on the whole set,
+ * because the whole set is the one view of the Mandelbrot everybody has
+ * already seen, and a viewer that starts by showing you something you have
+ * not is a better argument for itself. Then, having nothing else to do with
+ * the two cores, it draws the next one while you are still looking at this
+ * one - the line along the bottom edge is that render, exactly as it is
+ * during a zoom - and dissolves across when it is ready and the current
+ * picture has had its dwell.
+ *
+ * The whole of it ends on the first touch, and ends by handing over what is
+ * on the panel: mid-dissolve it snaps to the picture that was arriving,
+ * mid-render it throws the half-drawn one away and keeps the one you were
+ * looking at. Either way the scene the buttons act on is the scene on the
+ * glass, which is the only version of this that is not infuriating.
+ */
+
+#define AT_DWELL_MS  9000   /* how long a finished picture is left up */
+/*
+ * A second, and the clock decides how many frames that is.
+ *
+ * A frame of the dissolve is the whole picture blended into scratch, blitted
+ * to the back buffer and flushed through the PPA: measured on the tablet, 175
+ * + 40 + 55 ms, so about four of them fit. Counting frames instead and
+ * spacing the blend over eight of them is what the first version of this did,
+ * and it ran out of second halfway across - four even steps and then a jump
+ * from the midpoint to the new picture, which is worse than no dissolve at
+ * all because the jump is the thing you notice.
+ *
+ * So the position comes from the clock, and each frame is drawn for where the
+ * dissolve will be when that frame actually reaches the panel - one frame's
+ * measured cost ahead of now. Slower hardware draws fewer, larger steps in
+ * the same second; faster hardware draws more, smaller ones. Neither jumps.
+ */
+#define FADE_MS      1000
+#define FADE_BAND      32   /* rows blended at a time; see s_fade */
+
+static uint32_t s_at_t;         /* when the picture on the panel finished */
+static uint32_t s_fade_t0;      /* when the dissolve started */
+static uint32_t s_fade_cost;    /* what the last frame of it took */
+static int      s_fade_step;    /* frames drawn, for the log */
+
+/*
+ * A band of scratch to blend into, rather than blending in place.
+ *
+ * In place would need no memory at all and would not be a cross-fade: each
+ * step would have to work from the result of the last, and in RGB565 the
+ * small differences stop moving - a channel two steps apart never gets past
+ * the first rounding, so the picture jumps at the end instead of arriving.
+ * Blending both originals into somewhere else keeps every step exact, and a
+ * band is enough because the panel is written a band at a time anyway.
+ */
+static ngl_color_t   *s_fade;
+static ngl_surface_t *s_fades;
+static void          *s_fade_raw;
+
+/*
+ * One band of the blend, from the two pictures into the scratch.
+ *
+ * m is 0..256, and 256 is exactly the new picture - which is what lets the
+ * swap that follows the last frame be a change of bookkeeping rather than of
+ * pixels. The arithmetic never leaves the range either endpoint is already
+ * in, so there is nothing to clamp.
+ */
+static void fade_band(int y0, int n, int m)
+{
+    const ngl_color_t *a = s_buf[s_vis].pic + (size_t)y0 * s_pw;
+    const ngl_color_t *b = s_buf[s_tgt].pic + (size_t)y0 * s_pw;
+    ngl_color_t       *d = s_fade;
+    const size_t       np = (size_t)n * s_pw;
+
+    for (size_t i = 0; i < np; i++) {
+        const ngl_color_t ca = a[i], cb = b[i];
+        if (ca == cb) {
+            d[i] = ca;
+            continue;
+        }
+        const int r0 = (ca >> 11) & 31, g0 = (ca >> 5) & 63, b0 = ca & 31;
+        const int r = r0 + ((((int)((cb >> 11) & 31) - r0) * m) >> 8);
+        const int g = g0 + ((((int)((cb >>  5) & 63) - g0) * m) >> 8);
+        const int bl = b0 + ((((int)( cb        & 31) - b0) * m) >> 8);
+        d[i] = (ngl_color_t)((r << 11) | (g << 5) | bl);
+    }
+}
+
+/* One frame of the dissolve: the whole picture, a band at a time. */
+static void fade_paint(int m)
+{
+    ngl_surface_t *sc = ngl_screen();
+    if (!sc || !s_fades) {
+        return;
+    }
+    for (int y0 = 0; y0 < s_ph; y0 += FADE_BAND) {
+        const int n = s_ph - y0 < FADE_BAND ? s_ph - y0 : FADE_BAND;
+        fade_band(y0, n, m);
+        const ngl_rect_t src = ngl_rect(0, 0, (int16_t)s_pw, (int16_t)n);
+        ngl_blit(sc, s_area.x, (int16_t)(s_area.y + y0), s_fades, &src);
+    }
+
+    ui_paint();         /* the controls sit over the picture, so they go back */
+    ngl_flush();
+
+    /* A frame is a tenth of a second with no call that blocks in it, and
+       there are eight of them back to back. One tick off the CPU between
+       them is what keeps the idle task - and the watchdog watching it -
+       alive; see maybe_yield, which pays the same toll during a render. */
+    neos_sleep_ms(10);
+}
+
+/* The new picture is the picture: from here on it is the one being steered. */
+static void attract_swap(void)
+{
+    s_vis   = s_tgt;
+    s_shown = g_scene;
+    blit_band(0, s_ph);
+    present();
+    printf("[mandel] dissolved in %u ms over %d frames\n",
+           (unsigned)(now_ms() - s_fade_t0), s_fade_step);
+    worker_unpark();            /* the dissolve is over; it can have the other core back */
+    s_at_t = now_ms();
+    s_at   = AT_SHOW;
+}
+
+/* Start drawing the next one into the buffer the panel is not showing. */
+static void attract_next(void)
+{
+    s_at_t = now_ms();
+    s_at   = AT_MAKE;
+
+    pal_new(0);                 /* a new green as well as a new place */
+    target_set(1 - s_vis);
+    s_nhist = 0;
+    fr_find((uint8_t)rnd_range(0, MODE_COUNT - 1), &g_scene);
+    restart();
+}
+
+static void attract_step(void)
+{
+    switch (s_at) {
+    case AT_SHOW:
+        attract_next();
+        break;
+    case AT_MAKE:
+        /* Only reached with the render finished, so all that is left is the
+           dwell - which is measured from when this picture went up, so the
+           time spent drawing the next one is time already served. */
+        if (now_ms() - s_at_t < AT_DWELL_MS) {
+            neos_sleep_ms(20);
+            break;
+        }
+        worker_park();          /* nothing else touching either picture */
+        s_at        = AT_FADE;
+        s_fade_step = 0;
+        s_fade_cost = 0;
+        s_fade_t0   = now_ms();
+        break;
+    case AT_FADE: {
+        /*
+         * Where the dissolve should be by the time this frame is on the
+         * panel, which is one frame's worth after it is started. The first
+         * one has nothing measured yet and guesses a quarter of the second -
+         * being wrong about that costs one step's spacing, not the shape of
+         * the whole thing.
+         */
+        const uint32_t dt = now_ms() - s_fade_t0;
+        const uint32_t at = dt + (s_fade_cost ? s_fade_cost : FADE_MS / 4);
+
+        /* m == 256 is the new picture and nothing else, so the last frame is
+           not a blend at all - it is the swap, which blits that buffer whole. */
+        if (at >= FADE_MS) {
+            attract_swap();
+            break;
+        }
+        const uint32_t t = now_ms();
+        fade_paint((int)((256u * at) / FADE_MS));
+        s_fade_cost = now_ms() - t;
+        s_fade_step++;
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static void attract_stop(void)
+{
+    if (s_at == AT_OFF) {
+        return;
+    }
+    if (s_at == AT_FADE) {
+        attract_swap();                 /* land on the one that was arriving */
+    } else if (s_tgt != s_vis) {
+        /* Throw away the half-drawn one and put the raster back where the
+           picture on the panel needs it - a tap is about to ask fr_world
+           where a finger landed. */
+        target_set(s_vis);
+        g_scene = s_shown;
+        fr_scene(&g_scene);
+        fr_view(s_pw, s_ph);
+        s_rp = RP_DONE;
+        ui_paint();
+        ngl_flush();
+    }
+    s_at    = AT_OFF;
+    s_nhist = 0;
+    worker_unpark();            /* whichever way out that was */
+    neos_status_for("drag a frame to zoom, tap to dive in", 3000);
+    printf("[mandel] attract loop off, you have it\n");
+}
+
+static void attract_begin(void)
+{
+    s_at   = AT_SHOW;
+    s_at_t = now_ms();
+    fr_find(MODE_MANDEL, &g_scene);
+    restart();
 }
 
 /*
@@ -1337,6 +1761,36 @@ static void *alloc64(size_t n, void **raw)
     return (void *)(((uintptr_t)p + 63u) & ~(uintptr_t)63u);
 }
 
+/* One picture buffer and its index plane. Only the picture is required. */
+static bool pbuf_alloc(pbuf_t *b)
+{
+    b->pic = alloc64((size_t)s_pw * s_ph * sizeof(ngl_color_t), &b->pic_raw);
+    if (!b->pic) {
+        return false;
+    }
+    /* Black, not whatever the heap had: the controls and the progress line
+       are put back by copying out of here, and they go up before the first
+       pass has written a single pixel into it. */
+    memset(b->pic, 0, (size_t)s_pw * s_ph * sizeof(ngl_color_t));
+
+    b->pics = ngl_surface_wrap(b->pic, (int16_t)s_pw, (int16_t)s_ph, (int16_t)s_pw);
+    if (!b->pics) {
+        return false;
+    }
+    b->idx = alloc64((size_t)s_pw * s_ph, &b->idx_raw);
+    return true;
+}
+
+static void pbuf_free(pbuf_t *b)
+{
+    if (b->pics) {
+        ngl_surface_free(b->pics);
+    }
+    free(b->pic_raw);
+    free(b->idx_raw);
+    memset(b, 0, sizeof *b);
+}
+
 static bool layout(void)
 {
     s_area = ngl_app_area();
@@ -1348,45 +1802,61 @@ static bool layout(void)
     s_cgw = (s_pw + CO - 1) / CO;
     s_cgh = (s_ph + CO - 1) / CO;
 
-    s_pic = alloc64((size_t)s_pw * s_ph * sizeof(ngl_color_t), &s_pic_raw);
-    if (!s_pic) {
+    if (!pbuf_alloc(&s_buf[0])) {
         printf("[mandel] no room for a %dx%d picture\n", s_pw, s_ph);
         return false;
     }
-    /* Black, not whatever the heap had: the controls and the progress line
-       are put back by copying out of here, and they go up before the first
-       pass has written a single pixel into it. */
-    memset(s_pic, 0, (size_t)s_pw * s_ph * sizeof(ngl_color_t));
+    s_vis = 0;
+    target_set(0);
 
-    s_pics = ngl_surface_wrap(s_pic, (int16_t)s_pw, (int16_t)s_ph, (int16_t)s_pw);
-    if (!s_pics) {
-        return false;
+    /*
+     * The second picture, and the band the dissolve blends into. Both exist
+     * for the attract loop and nothing else, so failing to get them costs
+     * that and nothing else - which is the right trade on a machine where
+     * the first buffer is already most of two megabytes.
+     */
+    if (pbuf_alloc(&s_buf[1]) && s_buf[1].idx) {
+        s_fade = alloc64((size_t)FADE_BAND * s_pw * sizeof(ngl_color_t), &s_fade_raw);
+        if (s_fade) {
+            s_fades = ngl_surface_wrap(s_fade, (int16_t)s_pw, FADE_BAND, (int16_t)s_pw);
+        }
+    }
+    if (!s_fades) {
+        pbuf_free(&s_buf[1]);
+        free(s_fade_raw);
+        s_fade     = NULL;
+        s_fade_raw = NULL;
+        printf("[mandel] no second picture: no attract loop\n");
     }
 
     /* Both of these are optional. Without the index buffer there is no
        refinement and no instant recolour; without the coarse values the
        palette is fitted to the mode's whole range instead of this frame's. */
-    s_idx = alloc64((size_t)s_pw * s_ph, &s_idx_raw);
-    s_cv  = malloc((size_t)s_cgw * s_cgh * sizeof(float));
+    s_cv = malloc((size_t)s_cgw * s_cgh * sizeof(float));
     if (!s_idx) {
         printf("[mandel] no index buffer: no supersampling\n");
     }
 
     ui_layout();
-    printf("[mandel] %dx%d picture, coarse %dx%d\n", s_pw, s_ph, s_cgw, s_cgh);
+    printf("[mandel] %dx%d picture, coarse %dx%d, %u KB psram left\n",
+           s_pw, s_ph, s_cgw, s_cgh, (unsigned)(neos_psram_free() / 1024u));
     return true;
 }
 
 static void teardown(void)
 {
-    worker_stop();
-    if (s_pics) { ngl_surface_free(s_pics); s_pics = NULL; }
-    free(s_pic_raw);
-    free(s_idx_raw);
+    worker_stop();          /* first: it is still writing into these buffers */
+    if (s_fades) { ngl_surface_free(s_fades); s_fades = NULL; }
+    free(s_fade_raw);
+    s_fade     = NULL;
+    s_fade_raw = NULL;
+    pbuf_free(&s_buf[0]);
+    pbuf_free(&s_buf[1]);
     free(s_cv);
-    s_pic = NULL;
-    s_idx = NULL;
-    s_cv  = NULL;
+    s_cv   = NULL;
+    s_pic  = NULL;
+    s_pics = NULL;
+    s_idx  = NULL;
     neos_orient_unlock();
 }
 
@@ -1427,13 +1897,25 @@ int main(int argc, char **argv)
     worker_start();
 
     pal_new(0);
-    fr_home(MODE_MANDEL, &g_scene);
 
     ngl_clear(ngl_screen(), TH_BG);     /* clears all, repaints the system bar */
     ngl_flush();
-    restart();
 
-    neos_status_for("drag a frame to zoom, tap to dive in", 4000);
+    /*
+     * Somewhere the search found, not the whole set: that view is the one
+     * picture of the Mandelbrot everyone has already seen, and it is two
+     * taps away from here anyway - PLACE held down. Without the second
+     * buffer there is no attract loop to run afterwards, so the opening
+     * view is all it is.
+     */
+    if (s_fades) {
+        attract_begin();
+        neos_status_for("touch anywhere to take over", 4000);
+    } else {
+        fr_home(MODE_MANDEL, &g_scene);
+        restart();
+        neos_status_for("drag a frame to zoom, tap to dive in", 4000);
+    }
 
     while (!neos_app_close_requested()) {
         const int act = gesture_poll();
@@ -1458,6 +1940,11 @@ int main(int argc, char **argv)
             default: break;
             }
             continue;
+        case ACT_BTN_LONG:
+            if (s_act_btn == BTN_PLACE) {
+                zoom_home();
+            }
+            continue;
         default:
             break;
         }
@@ -1465,7 +1952,13 @@ int main(int argc, char **argv)
         orient_poll();
 
         if (s_rp != RP_DONE) {
+            s_w_busy = 1;
             render_step();
+            continue;
+        }
+        s_w_busy = 0;
+        if (s_at != AT_OFF) {
+            attract_step();             /* it sleeps for itself when it waits */
             continue;
         }
         neos_sleep_ms(20);

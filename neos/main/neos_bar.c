@@ -146,6 +146,15 @@ static ngl_rect_t status_rect(void)
 
 neos_bar_hit_t neos_bar_hit(int16_t x, int16_t y)
 {
+    /* TRACE: what the bar believes its own geometry is at the moment a tap is
+       tested against it. Remove with the matching block in neos_touch.c. */
+    {
+        const ngl_rect_t b = ngl_bar_rect();
+        const ngl_rect_t c = close_rect();
+        ESP_LOGI(TAG, "TRACE hit (%d,%d) rot=%d bar=%dx%d close=(%d,%d %dx%d) closable=%d",
+                 (int)x, (int)y, (int)ngl_rotation(), (int)b.w, (int)b.h,
+                 (int)c.x, (int)c.y, (int)c.w, (int)c.h, (int)s_closable);
+    }
     ngl_rect_t r = close_rect();
     if (s_closable && ngl_rect_contains(&r, x, y)) {
         return NEOS_BAR_CLOSE;
@@ -267,8 +276,9 @@ void neos_bar_widgets_refresh(void)
     }
     paint_wifi(s);
     paint_clock(s);
+    /* ngl_bar_end() flushes the widget strip; see neos_status.c for why this
+       must not be a full flush. */
     ngl_bar_end();
-    ngl_flush();
 }
 
 static void widget_tick(void *arg)

@@ -178,6 +178,66 @@ bool neos_tap_sound(void);
 bool neos_tap_sound_set(bool on);
 
 /* ------------------------------------------------------------------ */
+/* Audio                                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The only rate there is.
+ *
+ * The I2S channel is clocked once, at bring-up, and the codec plays whatever
+ * it is handed at the rate the channel runs at - so asking for another rate
+ * would not resample anything, it would play the right samples at the wrong
+ * speed. Rather than offer a parameter that has one legal value, the rate is
+ * a constant and resampling is the app's business, where it knows what its
+ * source is and can filter accordingly.
+ */
+#define NEOS_AUDIO_RATE 48000
+
+/**
+ * Take the speaker for as long as this app is running.
+ *
+ * Brings the codec up if tap sounds had not already, and holds it up until
+ * neos_audio_close(). False if the part will not play, and an app that wants
+ * to be usable on a tablet with no working codec has to carry on without it -
+ * so this is worth checking rather than assuming.
+ *
+ * Tap clicks are dropped while a stream is open. Two writers into one codec
+ * would interleave into each other's buffers, and a click under a game's own
+ * sound is not something anyone would hear anyway.
+ *
+ * Idempotent: a second open by an app that already holds the stream is a
+ * no-op returning true. NeOS closes the stream when the app returns from
+ * main(), so an app that exits without closing does not leave the amplifier
+ * powered - but closing is still the honest thing to do.
+ */
+bool neos_audio_open(void);
+
+/**
+ * Play @p n mono 16-bit frames at NEOS_AUDIO_RATE.
+ *
+ * Blocks until the codec has taken them, which makes it the app's frame
+ * clock: an emulator or a synth can drive its whole loop off the rate audio
+ * drains at and never needs a timer. Returns the number of frames accepted,
+ * or negative if the stream is not open.
+ *
+ * There is no queue and no callback. A block that is late is a gap in the
+ * sound, and an app that cannot keep up wants to find that out by blocking
+ * here rather than by discovering its buffer was dropped.
+ */
+int neos_audio_write(const int16_t *frames, int n);
+
+/**
+ * Output level, 0-100, applied to the codec and so to whatever plays next.
+ *
+ * Reset to the system's own level when the stream closes, so an app cannot
+ * leave the tablet louder than it found it. False if the stream is not open.
+ */
+bool neos_audio_gain(uint8_t percent);
+
+/** Give the speaker back. Safe to call without a stream open. */
+void neos_audio_close(void);
+
+/* ------------------------------------------------------------------ */
 /* Power                                                               */
 /* ------------------------------------------------------------------ */
 

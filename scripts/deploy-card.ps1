@@ -11,7 +11,8 @@
     card can carry apps that are not in this repo.
 
 .PARAMETER Drive
-    The card's drive letter. Defaults to G:.
+    The card's drive letter. Defaults to NEOS_CARD_DRIVE from .env.local, and
+    to G: if that is not set either - see .env.local.example.
 
 .PARAMETER Autorun
     Which app directory NeOS should launch on boot. Defaults to "launcher".
@@ -19,16 +20,22 @@
 
 .EXAMPLE
     .\scripts\deploy-card.ps1
-    .\scripts\deploy-card.ps1 -Drive H: -Autorun hello
+    .\scripts\deploy-card.ps1 -Drive E: -Autorun hello
 #>
 [CmdletBinding()]
 param(
-    [string] $Drive   = 'G:',
+    [string] $Drive,
     [string] $Autorun = 'launcher'
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+
+. (Join-Path $PSScriptRoot 'env.ps1')
+
+# Which letter a card reader takes is a property of the machine, not of this
+# repo, so the default comes from .env.local rather than from a value in here.
+if (-not $Drive) { $Drive = Get-NeosSetting 'NEOS_CARD_DRIVE' 'G:' }
 
 # app directory on the card  ->  the .app.elf the project builds
 $apps = @{
@@ -37,10 +44,12 @@ $apps = @{
     'matrix'   = 'apps\matrix\build\matrix.app.elf'
     'system'   = 'apps\system\build\system.app.elf'
     'mandel'   = 'apps\mandel\build\mandel.app.elf'
+    'clock'    = 'apps\clock\build\clock.app.elf'
 }
 
 if (-not (Test-Path $Drive)) {
-    throw "$Drive is not mounted - is the card in the reader?"
+    throw ("$Drive is not mounted - is the card in the reader? Pass -Drive, or " +
+           "set NEOS_CARD_DRIVE in .env.local if the reader is not on $Drive.")
 }
 
 foreach ($name in $apps.Keys) {

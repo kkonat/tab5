@@ -9,7 +9,7 @@
 
 .PARAMETER Port
     Serial port, e.g. COM16. Auto-detected from the ESP32-P4's USB-Serial-JTAG
-    device (VID 303A) when omitted.
+    device (VID 303A) when omitted, or taken from NEOS_PORT in .env.local.
 
 .PARAMETER Baud
     Upload baud rate. Defaults to 921600.
@@ -18,7 +18,8 @@
     Skip the confirmation prompt.
 
 .PARAMETER Esptool
-    Path to esptool. Falls back to the ESP-IDF 5.4.2 copy, then to PATH.
+    Path to esptool. Falls back to ESPTOOL from .env.local, then to the copy in
+    the ESP-IDF virtualenv, then to PATH.
 
 .EXAMPLE
     .\restore-flash.ps1
@@ -34,6 +35,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+. (Join-Path $PSScriptRoot 'env.ps1')
 
 $Chip      = 'esp32p4'
 $Root      = Split-Path -Parent $PSScriptRoot
@@ -52,32 +55,26 @@ function Find-Esptool {
         if (Test-Path $Esptool) { return $Esptool }
         Die "esptool not found at: $Esptool"
     }
-    $idf = 'C:\ESP-IDF\.espressif\python_env\idf5.4_py3.11_env\Scripts\esptool.exe'
-    if (Test-Path $idf) { return $idf }
-    foreach ($c in @('esptool.exe', 'esptool', 'esptool.py')) {
-        $cmd = Get-Command $c -ErrorAction SilentlyContinue
-        if ($cmd) { return $cmd.Source }
-    }
-    Die 'esptool not found. Install it (pip install esptool) or pass -Esptool <path>'
+    # Where the IDF put it, which is a different path on every machine: the
+    # search walks the exported virtualenv and the venvs under the tools path
+    # before falling back to PATH. See scripts/env.ps1.
+    $found = Find-NeosIdfTool 'esptool'
+    if ($found) { return $found }
+    Die ('esptool not found. Run this from an IDF-exported shell, set ESPTOOL ' +
+         'in .env.local, install it (pip install esptool), or pass -Esptool <path>')
 }
 $EsptoolBin = Find-Esptool
 
 # --- locate port --------------------------------------------------------------
 # The Tab5's ESP32-P4 exposes a native USB-Serial-JTAG device: VID 303A, PID 1001.
-function Find-Port {
-    $dev = Get-CimInstance Win32_PnPEntity |
-        Where-Object { $_.DeviceID -match 'VID_303A' -and $_.Name -match 'COM\d+' } |
-        Select-Object -First 1
-    if ($dev -and $dev.Name -match '(COM\d+)') { return $matches[1] }
-    return $null
-}
-
 if (-not $Port) {
-    $Port = Find-Port
+    # NEOS_PORT if the machine has one set, else the board on the bus.
+    $Port = Find-NeosPort
     if (-not $Port) {
-        Die 'Could not auto-detect the Tab5. Plug it in (USB-C, data cable) and/or pass -Port COM##'
+        Die ('Could not find the Tab5. Plug it in (USB-C, data cable), pass ' +
+             '-Port COM##, or set NEOS_PORT in .env.local')
     }
-    Write-Host "auto-detected port: $Port"
+    Write-Host "port: $Port"
 }
 
 # --- extract and verify -------------------------------------------------------

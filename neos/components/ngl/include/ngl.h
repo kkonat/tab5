@@ -346,6 +346,17 @@ ngl_rect_t ngl_surface_bounds(const ngl_surface_t *s);
 /** What draws are currently confined to, in surface coordinates. */
 ngl_rect_t ngl_surface_clip(const ngl_surface_t *s);
 
+/**
+ * Read-only view of row @p y: ngl_surface_w() pixels, contiguous.
+ *
+ * The one way to get pixels back out of a surface, and deliberately a row at a
+ * time - the stride stays ngl's business, so a caller that wants the whole
+ * surface walks it. NULL if there is no such row. Nothing locks around this:
+ * a reader sees whatever is in the buffer as it passes, which is what a
+ * screenshot of a running app is anyway.
+ */
+const ngl_color_t *ngl_surface_row(const ngl_surface_t *s, int16_t y);
+
 /* ------------------------------------------------------------------ */
 /* Primitives                                                          */
 /* ------------------------------------------------------------------ */

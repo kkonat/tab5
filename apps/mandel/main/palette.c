@@ -26,8 +26,41 @@
 #include "mandel.h"
 
 ngl_color_t g_pal[256];
+uint8_t     g_pal8[256][3];
 float       g_pal_k     = 1.0f;
 float       g_pal_phase = 0.0f;
+
+/*
+ * The dither matrix, and why a fractal viewer needs one at all.
+ *
+ * The palette is built in eight bits a channel and then thrown away into
+ * RGB565, which has thirty-two reds, sixty-four greens and thirty-two blues.
+ * A gradient that walks the gamut in 255 steps therefore lands on the same
+ * 565 value for four or five entries in a row, and what
+ * that draws is not a gradient but a staircase: broad flat bands with hard
+ * edges, following the fractal's contours, in exactly the open water where
+ * the eye is least distracted and most able to see them.
+ *
+ * Ordered dithering fixes it for the price of one table lookup and an add.
+ * The threshold spreads each colour between the two 565 values it sits
+ * between, in the proportion it actually sits at, and an 8x8 cell is fine
+ * enough on a 1280 pixel panel to read as the colour rather than as texture.
+ * Error diffusion would be better and cannot be used: it is serial along the
+ * row, and both the interlace and the second core need pixels to be
+ * independent of their neighbours.
+ *
+ * Values are 0..63, in the standard recursive Bayer order.
+ */
+const uint8_t g_bayer8[64] = {
+     0, 32,  8, 40,  2, 34, 10, 42,
+    48, 16, 56, 24, 50, 18, 58, 26,
+    12, 44,  4, 36, 14, 46,  6, 38,
+    60, 28, 52, 20, 62, 30, 54, 22,
+     3, 35, 11, 43,  1, 33,  9, 41,
+    51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47,  7, 39, 13, 45,  5, 37,
+    63, 31, 55, 23, 61, 29, 53, 21,
+};
 
 /* ------------------------------------------------------------------ gamut */
 
@@ -196,6 +229,12 @@ void pal_new(uint32_t seed)
             const int r = a.r + ((int)b.r - (int)a.r) * s / 255;
             const int g = a.g + ((int)b.g - (int)a.g) * s / 255;
             const int bl = a.b + ((int)b.b - (int)a.b) * s / 255;
+            /* Both tables: the eight-bit one is what gets dithered and drawn,
+               the 565 one is for the places that want a flat fill and for
+               anything comparing two entries. */
+            g_pal8[j][0] = (uint8_t)r;
+            g_pal8[j][1] = (uint8_t)g;
+            g_pal8[j][2] = (uint8_t)bl;
             g_pal[j] = NGL_RGB(r, g, bl);
         }
     }
@@ -203,6 +242,9 @@ void pal_new(uint32_t seed)
     /* The interior is not part of the cycle: it is the one thing on screen
        that is a shape rather than a gradient, and it reads best as the ground
        the rest is drawn on. */
+    g_pal8[0][0] = 0;
+    g_pal8[0][1] = 5;
+    g_pal8[0][2] = 4;
     g_pal[0] = NGL_RGB(0, 5, 4);
 }
 

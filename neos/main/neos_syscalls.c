@@ -13,6 +13,7 @@
 #include "neos_status.h"
 #include "neos_sys.h"
 #include "neos_time.h"
+#include "neos_weather.h"
 #include "neos_api.h"
 #include "neos_boot.h"
 #include "neos_touch.h"
@@ -109,6 +110,11 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
      * to load - which is a confusing morning.
      */
     ESP_ELFSYM_EXPORT(memmove),
+    /* memcmp is here for the same reason and with the same surprise: the
+       loader's table has memcpy and memset but neither of the other two, and
+       gcc will synthesise a call to this one for a struct comparison the app
+       never wrote as a function call. */
+    ESP_ELFSYM_EXPORT(memcmp),
 
     /* ngl: screen and surfaces */
     ESP_ELFSYM_EXPORT(ngl_screen),
@@ -236,6 +242,17 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     ESP_ELFSYM_EXPORT(neos_net_scanning),
     ESP_ELFSYM_EXPORT(neos_net_scan_results),
 
+    /*
+     * The weather, on the same terms as the network it arrives over: NeOS
+     * does the fetching, an app reads the reading. What is not here is a
+     * way to ask for a different place - there is one tablet in one room,
+     * and an app that could move it would be an app that decides where the
+     * machine thinks it is for whatever runs next.
+     */
+    ESP_ELFSYM_EXPORT(neos_weather),
+    ESP_ELFSYM_EXPORT(neos_weather_refresh),
+    ESP_ELFSYM_EXPORT(neos_weather_fetching),
+
     /* power */
     ESP_ELFSYM_EXPORT(neos_power_read),
     ESP_ELFSYM_EXPORT(neos_power_monitor_addr),
@@ -249,6 +266,12 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     ESP_ELFSYM_EXPORT(neos_settings_reset),
     ESP_ELFSYM_EXPORT(neos_tap_sound),
     ESP_ELFSYM_EXPORT(neos_tap_sound_set),
+
+    /* the speaker, for an app that generates its own sound */
+    ESP_ELFSYM_EXPORT(neos_audio_open),
+    ESP_ELFSYM_EXPORT(neos_audio_write),
+    ESP_ELFSYM_EXPORT(neos_audio_gain),
+    ESP_ELFSYM_EXPORT(neos_audio_close),
 
     /* the card and the bus it shares the board with */
     ESP_ELFSYM_EXPORT(neos_sd_mounted),
@@ -264,6 +287,7 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
 
     /* the card, for an app that has something to keep */
     ESP_ELFSYM_EXPORT(neos_file_write),
+    ESP_ELFSYM_EXPORT(neos_file_read),
 
     /* the boot chain: how one app hands over to the next */
     ESP_ELFSYM_EXPORT(neos_exec),

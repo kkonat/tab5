@@ -7,7 +7,8 @@
 #   ./restore-flash.sh -p COM16         # explicit port
 #   ./restore-flash.sh -p COM16 -y      # no confirmation prompt
 #
-# Override the esptool binary with ESPTOOL=/path/to/esptool if needed.
+# The port and the esptool binary both come from .env.local (NEOS_PORT and
+# ESPTOOL) when they are set there, and are worked out at runtime otherwise.
 
 set -euo pipefail
 
@@ -20,6 +21,33 @@ CHIP=esp32p4
 BAUD=921600
 PORT=""
 ASSUME_YES=0
+
+# Machine-local settings: paths and device names that differ per checkout. The
+# file is gitignored; .env.local.example documents the keys. Read rather than
+# sourced so that a stray line cannot run as a command, and only for keys that
+# are not already set, so the environment still wins.
+env_local() {
+    local file="$ROOT/.env.local" line key value q
+    [[ -f "$file" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%[[:space:]]}"       # trailing CR, from a Windows editor
+        line="${line#"${line%%[![:space:]]*}"}"
+        case "$line" in ''|'#'*) continue ;; 'export '*) line="${line#export }" ;; esac
+        [[ "$line" == *=* ]] || continue
+        key="${line%%=*}"; value="${line#*=}"
+        key="${key//[[:space:]]/}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        # Strip one layer of matching quotes, for a path with spaces in it.
+        q="${value:0:1}"
+        if [[ ${#value} -ge 2 && "$q" == "${value: -1}" ]] && [[ "$q" == '"' || "$q" == "'" ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+        [[ -n "${!key:-}" ]] || printf -v "$key" '%s' "$value"
+        export "${key?}"
+    done < "$file"
+}
+env_local
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -47,12 +75,21 @@ find_esptool() {
         [[ -x "$ESPTOOL" ]] || command -v "$ESPTOOL" >/dev/null || die "ESPTOOL set but not executable: $ESPTOOL"
         echo "$ESPTOOL"; return
     fi
-    local idf="/c/ESP-IDF/.espressif/python_env/idf5.4_py3.11_env/Scripts/esptool.exe"
-    [[ -x "$idf" ]] && { echo "$idf"; return; }
+    # Where the IDF put it, which is a different path on every machine: the
+    # interpreter idf.py exports first, then the venvs under the tools path,
+    # newest first so a current install wins over one left behind.
+    local dir
+    local tools="${IDF_TOOLS_PATH:-$HOME/.espressif}"
+    for dir in "${IDF_PYTHON_ENV_PATH:-}"                $(ls -d "$tools"/python_env/* 2>/dev/null | sort -r); do
+        [[ -n "$dir" ]] || continue
+        for c in "$dir/Scripts/esptool.exe" "$dir/bin/esptool" "$dir/bin/esptool.py"; do
+            [[ -x "$c" ]] && { echo "$c"; return; }
+        done
+    done
     for c in esptool esptool.py; do
         command -v "$c" >/dev/null && { echo "$c"; return; }
     done
-    die "esptool not found. Install it (pip install esptool) or set ESPTOOL=/path/to/esptool"
+    die "esptool not found. Run this from an IDF-exported shell, set ESPTOOL in .env.local, or pip install esptool"
 }
 ESPTOOL_BIN="$(find_esptool)"
 

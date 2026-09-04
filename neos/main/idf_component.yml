@@ -10,7 +10,13 @@ dependencies:
   # The BSP pulls espressif/usb (for the UVC camera). Every 1.x release we can
   # resolve declares idf>=5.4 but calls usb_dwc_hal functions that do not exist
   # until a later IDF, so it will not compile on 5.4.2. Nothing here uses USB,
-  # so point the dependency at IDF 5.4.2s own usb component instead.
+  # so point the dependency at the IDF's own usb component instead.
+  #
+  # $IDF_PATH is expanded by the component manager when the path is resolved,
+  # not when the manifest is parsed, so this follows whichever IDF is exported
+  # in the shell doing the build rather than naming one machine's install.
+  # A shell that has not been through IDF's export script has no IDF_PATH and
+  # the configure step says so; .env.local can hold it for the scripts.
   espressif/usb:
     version: "*"
-    override_path: "C:/ESP-IDF/esp-idf/v5.4.2/esp-idf/components/usb"
+    override_path: "$IDF_PATH/components/usb"

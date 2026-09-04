@@ -16,13 +16,18 @@ idf_component_register(SRCS "neos_main.c"
                             "neos_kbd.c"
                             "neos_time.c"
                             "neos_net.c"
+                            "neos_weather.c"
                             "neos_panel_clock.c"
                             "neos_panel_wifi.c"
                             "neos_upload.c"
+                            "neos_screencap.c"
                        INCLUDE_DIRS "."
                        REQUIRES json nvs_flash esp_lcd esp_lcd_touch ngl neos_api bmi270 esp_timer sdmmc
                                 esp_driver_usb_serial_jtag esp_driver_i2c esp_driver_tsens
                                 esp_io_expander espressif__esp_io_expander_pi4ioe5v6408 esp_codec_dev esp_wifi esp_netif esp_event lwip
+                                # The weather service: one plain GET and one over TLS
+                                # against the IDF certificate bundle.
+                                esp_http_client esp-tls mbedtls
                                 esp_app_format fatfs
                                 # The radio is a second chip on the far side of SDIO, and taking
                                 # its power away means tearing that transport down first - which

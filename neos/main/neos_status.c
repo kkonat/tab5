@@ -82,8 +82,10 @@ static void paint_locked(void)
         }
     }
 
+    /* No ngl_flush(): ngl_bar_end() pushes the strip on its own, and a full
+       flush from this task would take a running app's half-drawn frame with
+       it - which at thirty frames a second is the app strobing. */
     ngl_bar_end();
-    ngl_flush();
 }
 
 /* Decide centred vs marquee for the region we have right now. */

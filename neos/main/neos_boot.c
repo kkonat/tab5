@@ -1,4 +1,5 @@
 #include <string.h>
+#include <sys/stat.h>
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -20,6 +21,7 @@
 #include "neos_status.h"
 #include "neos_touch.h"
 #include "neos_ui.h"
+#include "neos_weather.h"
 
 static const char *TAG = "neos";
 
@@ -33,6 +35,7 @@ static const char *TAG = "neos";
 static char s_exec_req[sizeof(((neos_app_t *)0)->dir)];
 
 static volatile bool s_close_requested;
+static volatile bool s_app_running;
 static char          s_self[sizeof(((neos_app_t *)0)->dir)];
 
 void neos_app_request_close(void)
@@ -56,6 +59,80 @@ void neos_exec(const char *dir)
         strlcpy(s_exec_req, dir, sizeof(s_exec_req));
         ESP_LOGI(TAG, "app requested \"%s\" next", s_exec_req);
     }
+}
+
+/*
+ * A name from off the tablet, on its way to becoming a path. Anything with a
+ * separator or a dot-dot in it would reach outside /sdcard/apps, and a name
+ * with a control character in it makes for a confusing message screen, so
+ * neither gets as far as the chain.
+ */
+static bool dir_name_is_sane(const char *dir)
+{
+    if (!dir[0] || strlen(dir) >= sizeof(s_exec_req)) {
+        return false;
+    }
+    if (strcmp(dir, ".") == 0 || strstr(dir, "..")) {
+        return false;
+    }
+    for (const char *c = dir; *c; c++) {
+        if (*c == '/' || *c == '\\' || *c == ':' || (unsigned char)*c <= ' ') {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool neos_launch_request(const char *dir, char *err, size_t err_sz)
+{
+    /* Nothing to queue: the chain falls back to the autorun app on its own
+       when an app returns having asked for nothing. */
+    if (!dir || !dir[0]) {
+        if (!s_app_running) {
+            snprintf(err, err_sz, "no app is running");
+            return false;
+        }
+        neos_app_request_close();
+        return true;
+    }
+
+    if (!dir_name_is_sane(dir)) {
+        snprintf(err, err_sz, "bad app name");
+        return false;
+    }
+    if (!bsp_sdcard_get_handle()) {
+        snprintf(err, err_sz, "no card");
+        return false;
+    }
+
+    /*
+     * Asked of the filesystem rather than of the app list, because the list is
+     * the boot task's and is rescanned from under it; a stat is true of the
+     * card whoever asks. The chain scans and checks properly before it runs
+     * anything, so this is only here to turn the common mistake - a name that
+     * is not on the card - into an answer on the console.
+     */
+    char manifest[320];
+    snprintf(manifest, sizeof(manifest), "%s/apps/%s/manifest.json", BSP_SD_MOUNT_POINT, dir);
+    struct stat st;
+    if (stat(manifest, &st) != 0) {
+        snprintf(err, err_sz, "%s is not an app on this card", dir);
+        return false;
+    }
+
+    neos_exec(dir);
+
+    /*
+     * With nothing running there is nothing to ask, and the request would sit
+     * in s_exec_req until the chain next starts - which run_chain() picks up,
+     * so this is worth saying rather than failing.
+     */
+    if (!s_app_running) {
+        snprintf(err, err_sz, "nothing running, queued for the next card");
+        return true;
+    }
+    neos_app_request_close();
+    return true;
 }
 
 /*
@@ -224,6 +301,16 @@ static void run_chain(const char *autorun)
      */
     bool asked_for = false;
 
+    /*
+     * A launch asked for over the console while no app was running - between
+     * cards, or while the message screen was up - is still what to run. It
+     * would otherwise be cleared unlooked-at by the first pass below.
+     */
+    if (s_exec_req[0]) {
+        strlcpy(next, s_exec_req, sizeof(next));
+        asked_for = true;
+    }
+
     for (;;) {
         const neos_app_t *a = neos_apps_find(next);
         const bool blocked = a && a->crashes && !asked_for;
@@ -256,7 +343,9 @@ static void run_chain(const char *autorun)
         neos_touch_drop();
         neos_msg_none();          /* the app owns the screen now */
         neos_bar_set_closable(strcmp(a->dir, autorun) != 0);
+        s_app_running = true;
         const bool clean = neos_app_run(appdir, a->dir, a->name, a->entry, 0);
+        s_app_running = false;
         revoke_app_callbacks();
         if (clean) {
             neos_quarantine_clear(a->dir);
@@ -296,6 +385,11 @@ void neos_boot(void)
      * returns at once either way - see neos_net_init().
      */
     neos_net_init();
+
+    /* After the network and just as unhurried: it starts a task that waits
+       for an address, so on a tablet that never joins one this costs a task
+       control block and nothing else. */
+    neos_weather_init();
 
     xTaskCreate(card_watch_task, "cardwatch", 3072, NULL, 3, NULL);
     watch_orientation_for_os();

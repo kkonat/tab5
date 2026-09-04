@@ -129,6 +129,14 @@ ngl_rect_t ngl_surface_clip(const ngl_surface_t *s)
     return s ? s->clip : ngl_rect(0, 0, 0, 0);
 }
 
+const ngl_color_t *ngl_surface_row(const ngl_surface_t *s, int16_t y)
+{
+    if (!s || !s->px || y < 0 || y >= s->h) {
+        return NULL;
+    }
+    return &s->px[(size_t)y * s->stride];
+}
+
 void ngl_surface_free(ngl_surface_t *s)
 {
     if (!s) {

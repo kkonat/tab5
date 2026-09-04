@@ -1,10 +1,14 @@
 /*
- * Tap sounds, core side. The switch that turns them on is in neos_sys.h.
+ * The speaker, core side. What apps see of it is in neos_sys.h.
  *
- * The only thing NeOS plays. There is no audio API for apps yet and this is
- * deliberately not the start of one - it is one waveform, generated at
- * bring-up, played from one task, and the whole module exists so that a touch
- * on the glass makes the noise a touch should make.
+ * Two things want this one codec: the tap click, which is NeOS's own and is
+ * one waveform played from one task, and an app's stream, which is whatever
+ * the app is generating. Either can bring the part up and it stays up while
+ * either still wants it; while an app holds the stream the click is dropped,
+ * because two writers into one codec interleave into each other's buffers.
+ *
+ * The ES8388 and the I2S plumbing come from the BSP - nothing here talks to
+ * the part directly.
  */
 #pragma once
 
@@ -31,3 +35,15 @@ void neos_audio_init(void);
  * A no-op when tap sounds are off, which is the state that costs nothing.
  */
 void neos_audio_click(void);
+
+/**
+ * Close an app's stream if it returned from main() still holding one.
+ *
+ * Called by the boot chain after every app, because there is no other moment
+ * at which it could be noticed: an app exits by returning, so nothing runs on
+ * its behalf afterwards, and a forgotten neos_audio_close() would otherwise
+ * leave the amplifier powered and the launcher's clicks suppressed for the
+ * rest of the session. Silent when no app held the stream, which is the
+ * ordinary case.
+ */
+void neos_audio_app_release(void);

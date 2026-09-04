@@ -1,0 +1,19 @@
+{
+  "_comment": "The clock app's weather icons. Same font and licence as icons.json; a separate spec and a separate prefix because these belong to one app rather than to the system set - see that file for the attribution.",
+  "font": "tools/genicons/fonts/fa-solid-900.ttf",
+  "prefix": "clock_icon",
+  "sizes": [48],
+  "_codes": "WMO 4677, mapped to a picture in mode_common.c. Day and night differ only for the clear and near-clear codes, which is where the difference is legible.",
+  "icons": {
+    "sun":       "0xF185",
+    "moon":      "0xF186",
+    "cloudsun":  "0xF6C4",
+    "cloudmoon": "0xF6C3",
+    "cloud":     "0xF0C2",
+    "fog":       "0xF75F",
+    "drizzle":   "0xF73D",
+    "rain":      "0xF740",
+    "snow":      "0xF2DC",
+    "storm":     "0xF0E7"
+  }
+}

@@ -109,7 +109,7 @@ Write the touch driver against ST7123.
 
 ```
 # flash + partition facts
-esptool -p COM16 flash_id
+esptool flash_id            # -p COM16 if more than one board is attached
 tar -xzOf original_flash/tab5-stock-backup.tar.gz tab5-backup-full.bin > flash.bin
 gen_esp32part.py <(dd if=flash.bin bs=1 skip=32768 count=3072)
 esptool --chip esp32p4 image_info <(dd if=flash.bin bs=4096 skip=16 count=2560)

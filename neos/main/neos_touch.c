@@ -62,6 +62,9 @@ static volatile int16_t s_x, s_y;
 static volatile bool    s_tap_pending;
 static volatile int16_t s_tap_x, s_tap_y;
 
+/* TRACE: raw panel coordinates of the first finger, for the tap trace. */
+static volatile int16_t s_raw_x, s_raw_y;
+
 /* Where the current press started, to tell a tap from a drag. */
 static int16_t s_press_x, s_press_y;
 
@@ -91,6 +94,13 @@ static int read_points(int16_t *xs, int16_t *ys)
     for (int i = 0; i < count; i++) {
         ngl_from_panel((int16_t)px[i], (int16_t)py[i], &xs[i], &ys[i]);
     }
+    /* TRACE: the raw panel point behind the first finger, so a tap can be
+       compared against where the bar thinks its buttons are. Remove with the
+       matching block in neos_bar_hit(). */
+    if (count > 0) {
+        s_raw_x = (int16_t)px[0];
+        s_raw_y = (int16_t)py[0];
+    }
     return count;
 }
 
@@ -107,6 +117,9 @@ static int read_points(int16_t *xs, int16_t *ys)
  */
 static bool bar_took_it(int16_t x, int16_t y)
 {
+    ESP_LOGI(TAG, "TRACE tap panel(%d,%d) -> screen(%d,%d) rot=%d captured=%d",
+             (int)s_raw_x, (int)s_raw_y, (int)x, (int)y, (int)ngl_rotation(),
+             (int)s_captured);
     if (s_captured > 0) {
         return false;
     }

@@ -10,6 +10,7 @@
 
 #include "neos_abi.h"
 #include "neos_app.h"
+#include "neos_audio.h"
 #include "neos_crash.h"
 
 static const char *TAG = "neos";
@@ -132,6 +133,13 @@ bool neos_app_run(const char *appdir, const char *dirname,
     err = esp_elf_request(&elf, 0, 2, argv);
     ESP_LOGI(TAG, "  ---- \"%s\" returned, status %d ----", name, err);
     neos_crumb_leave();
+
+    /*
+     * Anything the app took and did not give back has to be given back here.
+     * Returning from main() is the only exit an app has, so this is the only
+     * place a leak of something system-wide can be caught.
+     */
+    neos_audio_app_release();
 
     esp_elf_deinit(&elf);
     return err == 0;

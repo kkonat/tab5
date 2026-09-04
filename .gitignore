@@ -24,8 +24,19 @@ Thumbs.db
 desktop.ini
 .DS_Store
 
+# --- machine-local configuration ---------------------------------------
+# Paths and device names that differ per machine: the IDF checkout, the
+# serial port, the card reader's drive letter. .env.local.example is the
+# tracked template and README.md describes the keys.
+.env.local
+
 # --- serial / flash scratch -------------------------------------------
 *.tmp
+
+# Screenshots pulled off the tablet by scripts/screencap.py. Kept out of the
+# repo on purpose: they are 1280x720 PNGs taken by the dozen while working on
+# a screen, and the ones worth keeping belong in docs/ by hand.
+screencaps/
 
 # --- logs --------------------------------------------------------------
 *.log
@@ -33,3 +44,10 @@ desktop.ini
 # --- generated ---------------------------------------------------------
 # The build number is written into the build tree; build_number.txt is tracked.
 neos_build.h
+
+# --- other people's ----------------------------------------------------
+# Emulator assets built by tools/genlcd from a MAME romset: a mask ROM and
+# somebody's traced artwork, neither of which is ours to check in. The tool
+# and its README are; the output is a card file, made locally.
+*.lcd
+*.gw

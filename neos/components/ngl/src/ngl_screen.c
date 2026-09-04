@@ -77,6 +77,20 @@ static SemaphoreHandle_t s_lock;
 static ngl_rect_t         s_bar_saved_clip;
 
 /*
+ * The bar's own dirty rectangle, kept apart from the list above.
+ *
+ * The two accumulators are not interchangeable. An app's list is a record of
+ * what it has half-finished - a row erased back to its background with the
+ * digits not yet over it - and it is the app that decides when that is a
+ * frame. The bar animates from another task entirely, so a bar repaint that
+ * shared the list would flush the app's erased rows with its own strip and
+ * put the inside of somebody else's frame on the panel; at the thirty frames
+ * a second a scrolling toast runs at, that is the app strobing.
+ */
+static bool               s_bar_open;
+static ngl_rect_t         s_bar_dirty;
+
+/*
  * The modal overlay.
  *
  * s_ov_owner is the whole access-control mechanism: while it is set, a draw is
@@ -326,6 +340,15 @@ void ngl_dirty(const ngl_rect_t *r)
     }
     NGL_LOCK();
 
+    /* A bar repaint is not part of the app's frame; ngl_bar_end() flushes it
+       on its own. */
+    if (s_bar_open) {
+        s_bar_dirty = ngl_rect_empty(&s_bar_dirty) ? *r
+                                                   : ngl_rect_union(&s_bar_dirty, r);
+        NGL_UNLOCK();
+        return;
+    }
+
     /* Merge into an existing rect when the union does not waste much, so a
        row of small updates does not immediately fill the list. */
     for (int i = 0; i < s_ndirty; i++) {
@@ -517,6 +540,8 @@ ngl_surface_t *ngl_bar_begin(ngl_rect_t region)
         r = ngl_rect(0, 0, 0, 0);
     }
     s_back.clip = r;
+    s_bar_open = true;
+    s_bar_dirty = ngl_rect(0, 0, 0, 0);
     return &s_back;
 }
 
@@ -526,6 +551,23 @@ void ngl_bar_end(void)
         return;
     }
     s_back.clip = s_bar_saved_clip;
+
+    /*
+     * The strip that was just drawn goes to the panel here, which is why no
+     * bar painter calls ngl_flush(): that would take the app's pending
+     * rectangles with it. Safe to do under the lock and behind an app's back
+     * because the two regions are disjoint - the bar is reserved, and an app
+     * cannot draw into it.
+     */
+    if (s_bar_open) {
+        s_bar_open = false;
+        const ngl_rect_t full = ngl_rect(0, 0, s_back.w, s_back.h);
+        ngl_rect_t d;
+        if (!ngl_rect_empty(&s_bar_dirty) &&
+            ngl_rect_intersect(&s_bar_dirty, &full, &d)) {
+            flush_one(d);
+        }
+    }
     NGL_UNLOCK();
 }
 

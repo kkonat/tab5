@@ -87,6 +87,27 @@ const char *neos_app_self(void);
  */
 int neos_file_write(const char *rel, const void *data, size_t len);
 
+/**
+ * Read a whole file back off the card.
+ *
+ * @param rel   path relative to the card root, as for neos_file_write().
+ * @param buf   filled with the file
+ * @param size  how much room @p buf has
+ * @return how many bytes were placed in @p buf, or negative on failure.
+ *         -3 means there is no such file, which is the ordinary answer the
+ *         first time an app looks for its own settings and not an error worth
+ *         a message.
+ *
+ * A file longer than @p size is refused rather than truncated: half a settings
+ * file parses as well as a whole one and then means something else, so the
+ * caller is told its buffer was too small instead of being handed a prefix.
+ *
+ * The mirror of neos_file_write(), and no handle crosses here either - the
+ * file is opened, read and closed inside the call, for the reason in that
+ * function's comment.
+ */
+int neos_file_read(const char *rel, void *buf, size_t size);
+
 /* ------------------------------------------------------------------ */
 /* Touch                                                               */
 /* ------------------------------------------------------------------ */

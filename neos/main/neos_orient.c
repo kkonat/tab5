@@ -155,8 +155,18 @@ const char *neos_orient_name(ngl_rotation_t r)
 void neos_orient_lock(ngl_rotation_t r)
 {
     s_locked = true;
-    if (r != s_rot) {
-        s_rot = r;
+    s_rot = r;
+    /*
+     * Driven off the display rotation, not off s_rot.
+     *
+     * s_rot is what gravity last said, which is not the same thing as what
+     * the screen is actually showing - a rotation refused while a panel was
+     * up, or one this lock is now overriding, leaves the two apart. Comparing
+     * against s_rot there means an app that pins the orientation it is
+     * already "in" pins nothing: the panel stays where it was, and the system
+     * bar - close button included - stays with it, in the pre-freeze place.
+     */
+    if (ngl_rotation() != r) {
         ngl_set_rotation(r);
         if (s_on_change) {
             s_on_change(r);
@@ -186,7 +196,17 @@ static void watch_task(void *arg)
         if (s_locked) {
             continue;
         }
-        if (neos_orient_update()) {
+        /*
+         * Re-offer as well as report changes.
+         *
+         * ngl refuses a rotation while a modal panel is up, and update() only
+         * ever returns true the first time gravity moves - so a refused
+         * rotation is never mentioned again and the screen stays behind the
+         * tablet until it happens to be turned twice. Comparing against what
+         * the display is actually showing catches that on the next tick.
+         */
+        const bool moved = neos_orient_update();
+        if (moved || ngl_rotation() != s_rot) {
             ngl_set_rotation(s_rot);
             if (s_on_change) {
                 s_on_change(s_rot);

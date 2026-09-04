@@ -13,7 +13,17 @@
  *
  * There is a matching @NEOSDEL <path> for taking something off again,
  * which removes a directory and its contents when handed one - deleting an
- * app should not mean naming each of its files.
+ * app should not mean naming each of its files. And @NEOSCAP, which takes no
+ * argument and sends the screen back the other way; the reply format for that
+ * one is neos_screencap.c's business, not this file's.
+ *
+ * @NEOSRUN <app> starts an app, and @NEOSRUN on its own goes back to the
+ * card's autorun one. That is the last thing the card was needed for during
+ * development: with it, a rebuilt app is uploaded and on the screen without
+ * touching the tablet, and without autorun.cfg having to name whatever is
+ * being worked on this afternoon. It answers @NEOSRUN-OK or @NEOSRUN-ERR,
+ * and the OK means queued rather than started - the app that is running has
+ * to return first. See neos_boot.c.
  *
  * and the reply is one line, @NEOSPUT-OK or @NEOSPUT-ERR. The header is text
  * so it survives being read by a human staring at a terminal, and the magic is
@@ -46,6 +56,8 @@
 #include "bsp/m5stack_tab5.h"
 
 #include "neos_api.h"
+#include "neos_boot.h"
+#include "neos_screencap.h"
 #include "neos_status.h"
 #include "neos_upload.h"
 
@@ -55,6 +67,8 @@ static const char *TAG = "upload";
 #define TX_BUF          256
 #define MAGIC           "@NEOSPUT "
 #define MAGIC_DEL       "@NEOSDEL "
+#define MAGIC_CAP       "@NEOSCAP"
+#define MAGIC_RUN       "@NEOSRUN"
 #define HDR_MAX         192
 #define BLOCK           4096
 #define BODY_TIMEOUT_MS 5000
@@ -63,6 +77,14 @@ static const char *TAG = "upload";
 #define PATH_MAX_REL 128
 
 static uint8_t s_block[BLOCK];
+
+/** What the host asked for. Everything else on the line is log output. */
+typedef enum {
+    VERB_PUT,
+    VERB_DEL,
+    VERB_CAP,
+    VERB_RUN,
+} verb_t;
 
 /** One byte, or false on timeout. */
 static bool rx_byte(uint8_t *b, int timeout_ms)
@@ -77,7 +99,7 @@ static bool rx_byte(uint8_t *b, int timeout_ms)
  * for it. Anything that does not start with the magic is discarded silently -
  * complaining about it would mean logging about every log line.
  */
-static bool read_header(char *out, size_t out_sz, bool *is_delete)
+static bool read_header(char *out, size_t out_sz, verb_t *verb)
 {
     static char line[HDR_MAX];
     static size_t len;
@@ -86,17 +108,26 @@ static bool read_header(char *out, size_t out_sz, bool *is_delete)
     while (rx_byte(&c, portMAX_DELAY)) {
         if (c == '\n' || c == '\r') {
             line[len] = 0;
-
-            /* Both verbs have the same shape and the same length, so the path
-               starts at the same offset either way. */
-            const bool put = strncmp(line, MAGIC, sizeof(MAGIC) - 1) == 0;
-            const bool del = strncmp(line, MAGIC_DEL, sizeof(MAGIC_DEL) - 1) == 0;
-            if (put || del) {
-                *is_delete = del;
-                strlcpy(out, line + sizeof(MAGIC) - 1, out_sz);
-            }
             len = 0;
-            if (put || del) {
+
+            /* Whatever follows the magic: a path for two of these verbs, an
+               app name or nothing for the other two. */
+            const char *arg = NULL;
+            if (strncmp(line, MAGIC, sizeof(MAGIC) - 1) == 0) {
+                *verb = VERB_PUT;
+                arg = line + sizeof(MAGIC) - 1;
+            } else if (strncmp(line, MAGIC_DEL, sizeof(MAGIC_DEL) - 1) == 0) {
+                *verb = VERB_DEL;
+                arg = line + sizeof(MAGIC_DEL) - 1;
+            } else if (strncmp(line, MAGIC_CAP, sizeof(MAGIC_CAP) - 1) == 0) {
+                *verb = VERB_CAP;
+                arg = line + sizeof(MAGIC_CAP) - 1;
+            } else if (strncmp(line, MAGIC_RUN, sizeof(MAGIC_RUN) - 1) == 0) {
+                *verb = VERB_RUN;
+                arg = line + sizeof(MAGIC_RUN) - 1;
+            }
+            if (arg) {
+                strlcpy(out, arg, out_sz);
                 return true;
             }
             continue;
@@ -280,8 +311,8 @@ static void upload_task(void *arg)
     char hdr[HDR_MAX];
 
     for (;;) {
-        bool is_delete = false;
-        if (!read_header(hdr, sizeof(hdr), &is_delete)) {
+        verb_t verb = VERB_PUT;
+        if (!read_header(hdr, sizeof(hdr), &verb)) {
             continue;
         }
 
@@ -289,7 +320,30 @@ static void upload_task(void *arg)
         long size = 0;
         unsigned long crc = 0;
 
-        if (is_delete) {
+        if (verb == VERB_CAP) {
+            neos_screencap_send(hdr);
+            continue;
+        }
+
+        if (verb == VERB_RUN) {
+            /* An empty argument is the whole request for "go home", so an
+               app name that is not there is not an error here. */
+            char dir[64] = {0};
+            (void)sscanf(hdr, "%63s", dir);
+
+            /* A reason on the way out, and on the way through a note: a
+               request can be accepted and still not be about to happen. */
+            char note[96] = {0};
+            if (!neos_launch_request(dir, note, sizeof(note))) {
+                printf("@NEOSRUN-ERR %s\n", note);
+                continue;
+            }
+            printf("@NEOSRUN-OK %s%s%s\n", dir[0] ? dir : "home",
+                   note[0] ? " - " : "", note);
+            continue;
+        }
+
+        if (verb == VERB_DEL) {
             if (sscanf(hdr, "%127s", rel) != 1 || !path_is_sane(rel)) {
                 printf("@NEOSPUT-ERR bad path\n");
                 continue;
@@ -419,4 +473,56 @@ int neos_file_write(const char *rel, const void *data, size_t len)
 
     ESP_LOGI(TAG, "app wrote %s, %u bytes", full, (unsigned)len);
     return 0;
+}
+
+/*
+ * And reading one back.
+ *
+ * The mirror of the above and, on this machine, mostly how an app remembers
+ * something between runs: it hands NeOS a finished settings file on the way
+ * out and asks for it again on the way in. Same two guards - the path cannot
+ * escape the card, and the handle does not outlive the call.
+ *
+ * Refusing a file that does not fit rather than truncating it is the one
+ * decision here worth stating. A prefix of a config file is still a config
+ * file as far as any parser is concerned; it just says something the writer
+ * never wrote. Better a caller that knows its buffer was too small.
+ */
+int neos_file_read(const char *rel, void *buf, size_t size)
+{
+    if (!rel || !buf || !size) {
+        return -1;
+    }
+    if (!path_is_sane(rel)) {
+        ESP_LOGE(TAG, "app asked to read a path it may not: \"%s\"", rel);
+        return -2;
+    }
+
+    char full[PATH_MAX_REL + sizeof(BSP_SD_MOUNT_POINT) + 2];
+    snprintf(full, sizeof(full), "%s/%s", BSP_SD_MOUNT_POINT, rel);
+
+    struct stat st;
+    if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return -3;
+    }
+    if ((size_t)st.st_size > size) {
+        ESP_LOGW(TAG, "%s is %u bytes, the app offered room for %u",
+                 full, (unsigned)st.st_size, (unsigned)size);
+        return -6;
+    }
+
+    FILE *f = fopen(full, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "fopen %s: %s", full, strerror(errno));
+        return -3;
+    }
+
+    const size_t got = fread(buf, 1, (size_t)st.st_size, f);
+    fclose(f);
+
+    if (got != (size_t)st.st_size) {
+        ESP_LOGE(TAG, "read %s: %s", full, strerror(errno));
+        return -4;
+    }
+    return (int)got;
 }

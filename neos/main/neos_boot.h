@@ -9,6 +9,9 @@
  */
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
+
 /** Never returns. Waits for a card, reads autorun.cfg, and runs the chain. */
 void neos_boot(void);
 
@@ -28,3 +31,20 @@ void neos_exec(const char *dir);
  * timeout. The app decides when to act on it.
  */
 void neos_app_request_close(void);
+
+/**
+ * Launch @p dir on somebody else's behalf: neos_exec() plus a close request.
+ *
+ * This is the console's way in (@NEOSRUN, see neos_upload.c), and it is what
+ * an app's own neos_exec() is not: the caller is not the running app, so the
+ * running app has to be asked to go before the request can be honoured. An
+ * empty or NULL @p dir means "back to the card's autorun app" - just the
+ * close, with nothing queued behind it.
+ *
+ * Checks what it can up front - the name, the card, the manifest - so the
+ * caller gets an answer rather than the tablet flashing a message screen at
+ * nobody. False with a reason in @p err if any of that fails; true means the
+ * request is queued, not that the app has started, because it cannot start
+ * until whatever is running now returns.
+ */
+bool neos_launch_request(const char *dir, char *err, size_t err_sz);
