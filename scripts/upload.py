@@ -7,7 +7,8 @@ the launcher without the card ever leaving the slot. Uploading is the fast
 path; scripts/deploy-card.ps1 is still the way to seed a card from scratch or
 to fix one whose firmware will not boot.
 
-    # an app: goes to /apps/<name>/, named by its manifest's "entry"
+    # an app: goes to /apps/<name>/, named by its manifest's "entry".
+    # The project is looked for under apps/ and then lab/.
     ./do upload --app hello
 
     # any single file, path relative to the root of the card
@@ -47,14 +48,36 @@ BAUD = 921600
 REPLY_TIMEOUT_S = 10
 
 
+# Where an app project can be, in the order they are searched. lab/ is the
+# private repo of apps that are not published yet, cloned into this checkout
+# and gitignored; an app in it is an ordinary project at the same depth as one
+# under apps/. Missing directory is not an error - most checkouts have no lab/.
+APP_DIRS = ("apps", "lab")
+
+
+def app_dir(name):
+    """The project directory for an app, searching apps/ then lab/."""
+    found = [d for d in APP_DIRS
+             if os.path.isfile(os.path.join(REPO, d, name, "CMakeLists.txt"))]
+    if len(found) > 1:
+        sys.exit("%s is in %s - an app name has to mean one project, rename one"
+                 % (name, " and ".join(found)))
+    if not found:
+        # Not fatal here: the caller reports the missing ELF, which says more
+        # about what to do next than a missing directory would.
+        return os.path.join(REPO, APP_DIRS[0], name)
+    return os.path.join(REPO, found[0], name)
+
+
 def app_paths(name):
     """Where an app's ELF is built, and what the card should call it."""
-    manifest = os.path.join(REPO, "apps", name, "manifest.json")
+    proj = app_dir(name)
+    manifest = os.path.join(proj, "manifest.json")
     entry = "app.elf"
     if os.path.exists(manifest):
         with open(manifest, encoding="utf-8") as fh:
             entry = json.load(fh).get("entry") or entry
-    local = os.path.join(REPO, "apps", name, "build", "%s.app.elf" % name)
+    local = os.path.join(proj, "build", "%s.app.elf" % name)
     return local, "apps/%s/%s" % (name, entry), manifest
 
 
@@ -171,7 +194,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     _env.add_port_argument(ap)
-    ap.add_argument("--app", help="app directory under apps/ - uploads its built ELF and manifest")
+    ap.add_argument("--app", help="app directory under apps/ or lab/ - uploads its built ELF and manifest")
     ap.add_argument("--file", help="a local file to upload")
     ap.add_argument("--as", dest="remote", help="path on the card (default: the file's own name)")
     ap.add_argument("--rm", help="delete a path on the card (a directory goes with its contents)")
@@ -194,7 +217,8 @@ def main():
     if args.app:
         local, remote, manifest = app_paths(args.app)
         if not os.path.exists(local):
-            sys.exit("%s is not built - run idf.py elf in apps/%s first" % (local, args.app))
+            proj = os.path.relpath(os.path.dirname(os.path.dirname(local)), REPO)
+            sys.exit("%s is not built - run idf.py elf in %s first" % (local, proj))
         upload(args.port, local, remote, args.quiet)
         if os.path.exists(manifest):
             upload(args.port, manifest, "apps/%s/manifest.json" % args.app, args.quiet)

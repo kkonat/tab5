@@ -45,6 +45,14 @@ screencaps/
 # The build number is written into the build tree; build_number.txt is tracked.
 neos_build.h
 
+# --- work in progress --------------------------------------------------
+# Apps that are not ready to publish live in a separate private repo,
+# cloned here as lab/. Here rather than anywhere else because an app's
+# CMakeLists reaches ../../neos/components: lab/<app>/ is the same depth as
+# apps/<app>/, so an app builds from either and publishing one is a move.
+# build-all, upload and deploy-card look in both directories.
+/lab/
+
 # --- other people's ----------------------------------------------------
 # Emulator assets built by tools/genlcd from a MAME romset: a mask ROM and
 # somebody's traced artwork, neither of which is ours to check in. The tool

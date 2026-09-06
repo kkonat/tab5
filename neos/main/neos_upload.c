@@ -526,3 +526,110 @@ int neos_file_read(const char *rel, void *buf, size_t size)
     }
     return (int)got;
 }
+
+/*
+ * How long a file is, so that reading one does not have to be a guess.
+ *
+ * neos_file_read() refuses a buffer that is too small, which is the right
+ * behaviour and leaves callers with no way to size one except to try. Apps
+ * were doubling a buffer up from half a megabyte and watching for -6, which
+ * costs an allocation per attempt and puts a ceiling on how large a file may
+ * be in the app rather than on the card.
+ *
+ * Whatever this says can be false a moment later - the card comes out without
+ * warning - so it informs an allocation and is not trusted by the read.
+ */
+int neos_file_size(const char *rel)
+{
+    if (!rel) {
+        return -1;
+    }
+    if (!path_is_sane(rel)) {
+        ESP_LOGE(TAG, "app asked for the size of a path it may not: \"%s\"", rel);
+        return -2;
+    }
+
+    char full[PATH_MAX_REL + sizeof(BSP_SD_MOUNT_POINT) + 2];
+    snprintf(full, sizeof(full), "%s/%s", BSP_SD_MOUNT_POINT, rel);
+
+    struct stat st;
+    if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return -3;
+    }
+    return (int)st.st_size;
+}
+
+/*
+ * And a piece of one.
+ *
+ * The whole-file call assumes the file is the unit, which it is for the
+ * settings an app writes on its way out and is not for a pack with several
+ * members inside it. Without an offset, getting at one member means the whole
+ * file has to be somewhere first - so the big copy and the small piece cut out
+ * of it are both live, and the big one is in PSRAM because that is where a
+ * megabyte goes. With one, each member is read to where it is going to live.
+ *
+ * Short of @p len only at end of file. A seek past the end is not an error and
+ * reads nothing, which is what makes it safe to walk a table of offsets that
+ * came out of a file the app has not finished trusting yet.
+ */
+int neos_file_read_at(const char *rel, void *buf, size_t len, uint32_t off)
+{
+    if (!rel || !buf || !len) {
+        return -1;
+    }
+    if (!path_is_sane(rel)) {
+        ESP_LOGE(TAG, "app asked to read a path it may not: \"%s\"", rel);
+        return -2;
+    }
+
+    char full[PATH_MAX_REL + sizeof(BSP_SD_MOUNT_POINT) + 2];
+    snprintf(full, sizeof(full), "%s/%s", BSP_SD_MOUNT_POINT, rel);
+
+    struct stat st;
+    if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return -3;
+    }
+    if (off >= (uint32_t)st.st_size) {
+        return 0;
+    }
+
+    FILE *f = fopen(full, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "fopen %s: %s", full, strerror(errno));
+        return -3;
+    }
+    if (fseek(f, (long)off, SEEK_SET) != 0) {
+        ESP_LOGE(TAG, "seek %s to %u: %s", full, (unsigned)off, strerror(errno));
+        fclose(f);
+        return -4;
+    }
+
+    /*
+     * In blocks for the reason the write path is: a megabyte inside one FATFS
+     * call is a megabyte during which the touch task, which is on this core,
+     * does not run.
+     */
+    uint8_t *p = (uint8_t *)buf;
+    size_t done = 0;
+    while (done < len) {
+        size_t want = len - done;
+        if (want > 16384) {
+            want = 16384;
+        }
+        const size_t got = fread(p + done, 1, want, f);
+        done += got;
+        if (got != want) {
+            if (ferror(f)) {
+                ESP_LOGE(TAG, "read %s: %s", full, strerror(errno));
+                fclose(f);
+                return -4;
+            }
+            break;              /* end of file, and done is the truth */
+        }
+        taskYIELD();
+    }
+
+    fclose(f);
+    return (int)done;
+}

@@ -48,7 +48,8 @@ static uint8_t *read_file(const char *path, size_t *out_size)
 
 bool neos_app_manifest(const char *dir, char *name, size_t name_sz,
                           char *entry, size_t entry_sz,
-                          char *desc, size_t desc_sz)
+                          char *desc, size_t desc_sz,
+                          char *cat, size_t cat_sz)
 {
     char path[320];
     snprintf(path, sizeof(path), "%s/manifest.json", dir);
@@ -71,11 +72,15 @@ bool neos_app_manifest(const char *dir, char *name, size_t name_sz,
     const cJSON *jn = cJSON_GetObjectItemCaseSensitive(root, "name");
     const cJSON *je = cJSON_GetObjectItemCaseSensitive(root, "entry");
     const cJSON *jd = cJSON_GetObjectItemCaseSensitive(root, "description");
+    const cJSON *jc = cJSON_GetObjectItemCaseSensitive(root, "category");
     if (cJSON_IsString(jn) && cJSON_IsString(je)) {
         strlcpy(name, jn->valuestring, name_sz);
         strlcpy(entry, je->valuestring, entry_sz);
         if (desc && desc_sz) {
             strlcpy(desc, cJSON_IsString(jd) ? jd->valuestring : "", desc_sz);
+        }
+        if (cat && cat_sz) {
+            strlcpy(cat, cJSON_IsString(jc) ? jc->valuestring : "", cat_sz);
         }
         ok = true;
     } else {

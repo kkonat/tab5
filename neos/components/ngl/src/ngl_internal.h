@@ -30,3 +30,17 @@ void ngl_surface_init(ngl_surface_t *s, ngl_color_t *px, int16_t w, int16_t h, i
  * not what they are asking about.
  */
 bool ngl_screen_blocked(const ngl_surface_t *s);
+
+/**
+ * Scale `sr` of `src` into `dr` of `dst` with the P4's pixel engine.
+ *
+ * False when it could not be done at all - no engine, a buffer whose rows do
+ * not sit on cache lines, a factor outside what the hardware scales - and then
+ * nothing has been written and the caller does the loop itself. Both rects are
+ * already clipped by the time this is called.
+ *
+ * Here rather than in ngl_draw.c because the PPA client belongs to the screen:
+ * one registration, shared with the rotation in the flush path.
+ */
+bool ngl_ppa_scale(ngl_surface_t *dst, ngl_rect_t dr,
+                   const ngl_surface_t *src, ngl_rect_t sr);

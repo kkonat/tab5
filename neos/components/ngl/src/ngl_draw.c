@@ -87,14 +87,22 @@ ngl_surface_t *ngl_surface_new(int16_t w, int16_t h)
     if (!s) {
         return NULL;
     }
-    /* DMA-capable so surfaces can be handed straight to esp_lcd if needed. */
-    ngl_color_t *px = heap_caps_calloc((size_t)w * h, sizeof(ngl_color_t),
-                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    /*
+     * DMA-capable so surfaces can be handed straight to esp_lcd if needed, and
+     * aligned - base and row both - so that ngl_blit_scale() can hand one to
+     * the PPA rather than falling back to a loop. A row rounded up to a whole
+     * number of 64-byte cache lines is 32 pixels of slack at worst, which is
+     * cheap against the alternative of every surface being ineligible for the
+     * one operation that most wants the hardware.
+     */
+    const int16_t stride = (int16_t)((w + 31) & ~31);
+    ngl_color_t *px = heap_caps_aligned_calloc(64, (size_t)stride * h, sizeof(ngl_color_t),
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
     if (!px) {
         free(s);
         return NULL;
     }
-    ngl_surface_init(s, px, w, h, w);
+    ngl_surface_init(s, px, w, h, stride);
     s->owns_px = true;
     return s;
 }
@@ -533,6 +541,116 @@ void ngl_blit_key(ngl_surface_t *dst, int16_t x, int16_t y,
         for (int16_t col = 0; col < dr.w; col++) {
             if (sp[col] != key) {
                 dp[col] = sp[col];
+            }
+        }
+    }
+    if (dst == ngl_screen()) { ngl_dirty(&dr); }
+}
+
+bool ngl_blit_scale(ngl_surface_t *dst, ngl_rect_t dst_rect,
+                   const ngl_surface_t *src, const ngl_rect_t *src_rect)
+{
+    if (!dst || !src || !dst->px || !src->px || ngl_screen_blocked(dst)) {
+        return false;
+    }
+    if (dst_rect.w <= 0 || dst_rect.h <= 0) {
+        return false;
+    }
+
+    const ngl_rect_t whole = ngl_rect(0, 0, src->w, src->h);
+    ngl_rect_t sr;
+    if (!ngl_rect_intersect(src_rect ? src_rect : &whole, &whole, &sr)) {
+        return false;
+    }
+
+    ngl_rect_t dr;
+    if (!ngl_rect_intersect(&dst_rect, &dst->clip, &dr)) {
+        return false;
+    }
+
+    /*
+     * The engine scales a block, not a block with a piece taken out of it, and
+     * working out which fraction of the source a clipped destination wants is
+     * exact only at integer factors. So the hardware gets the whole rectangle
+     * or none of it, and anything the clip touched goes round the loop below -
+     * which is the uninteresting case anyway: a frame placed inside the app
+     * area is not clipped, and one that is has just been dragged half off the
+     * screen.
+     */
+    if (dr.w == dst_rect.w && dr.h == dst_rect.h &&
+        ngl_ppa_scale(dst, dr, src, sr)) {
+        if (dst == ngl_screen()) { ngl_dirty(&dr); }
+        return true;
+    }
+
+    /*
+     * Nearest neighbour in 16.16. The source step is fixed by the *unclipped*
+     * destination, so a clipped blit shows the same part of the picture at the
+     * same size as an unclipped one would have - it is a window onto the same
+     * result, not a squeezed version of it.
+     */
+    const uint32_t stepx = ((uint32_t)sr.w << 16) / (uint32_t)dst_rect.w;
+    const uint32_t stepy = ((uint32_t)sr.h << 16) / (uint32_t)dst_rect.h;
+    const uint32_t offx  = (uint32_t)(dr.x - dst_rect.x) * stepx;
+    const uint32_t offy  = (uint32_t)(dr.y - dst_rect.y) * stepy;
+
+    for (int16_t row = 0; row < dr.h; row++) {
+        uint32_t syf = offy + (uint32_t)row * stepy;
+        int16_t sy = (int16_t)(sr.y + (syf >> 16));
+        if (sy >= sr.y + sr.h) { sy = (int16_t)(sr.y + sr.h - 1); }
+
+        const ngl_color_t *sp = &src->px[(size_t)sy * src->stride + sr.x];
+        ngl_color_t *dp = &dst->px[(size_t)(dr.y + row) * dst->stride + dr.x];
+
+        uint32_t sxf = offx;
+        for (int16_t col = 0; col < dr.w; col++) {
+            uint32_t sx = sxf >> 16;
+            if (sx >= (uint32_t)sr.w) { sx = (uint32_t)sr.w - 1; }
+            dp[col] = sp[sx];
+            sxf += stepx;
+        }
+    }
+    if (dst == ngl_screen()) { ngl_dirty(&dr); }
+    return true;
+}
+
+void ngl_blit_p8(ngl_surface_t *dst, int16_t x, int16_t y,
+                const uint8_t *src, int16_t w, int16_t h, int16_t stride,
+                const ngl_color_t *pal, int key)
+{
+    if (!dst || !dst->px || !src || !pal || w <= 0 || h <= 0 ||
+        ngl_screen_blocked(dst)) {
+        return;
+    }
+    if (stride <= 0) {
+        stride = w;
+    }
+
+    ngl_rect_t placed = ngl_rect(x, y, w, h), dr;
+    if (!ngl_rect_intersect(&placed, &dst->clip, &dr)) {
+        return;
+    }
+    /* However much the clip took off the left and top is where the source
+       starts - the same shift blit_setup() makes, done by hand because the
+       source here is not a surface. */
+    const int16_t sx0 = (int16_t)(dr.x - x);
+    const int16_t sy0 = (int16_t)(dr.y - y);
+
+    for (int16_t row = 0; row < dr.h; row++) {
+        const uint8_t *sp = &src[(size_t)(sy0 + row) * stride + sx0];
+        ngl_color_t *dp = &dst->px[(size_t)(dr.y + row) * dst->stride + dr.x];
+
+        if (key < 0) {
+            for (int16_t col = 0; col < dr.w; col++) {
+                dp[col] = pal[sp[col]];
+            }
+        } else {
+            const uint8_t k = (uint8_t)key;
+            for (int16_t col = 0; col < dr.w; col++) {
+                const uint8_t i = sp[col];
+                if (i != k) {
+                    dp[col] = pal[i];
+                }
             }
         }
     }

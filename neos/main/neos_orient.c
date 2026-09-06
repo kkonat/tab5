@@ -7,6 +7,8 @@
 #include "bsp/m5stack_tab5.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_timer.h"
 
 static const char *TAG = "orient";
 
@@ -18,6 +20,12 @@ static const char *TAG = "orient";
 #define FLAT_THRESHOLD_G 0.35f
 
 static bmi270_handle_t *s_imu;
+
+/* The cached sample and the mutex over it - see neos_orient_read(), which is
+   where the reasoning is. Up here because init() creates the mutex. */
+static float             s_ax, s_ay, s_az;
+static int64_t           s_sampled_us;
+static SemaphoreHandle_t s_imu_lock;
 static ngl_rotation_t    s_rot = NGL_ROT_0;
 static bool             s_have_confident_reading;
 static bool             s_locked;
@@ -56,20 +64,68 @@ esp_err_t neos_orient_init(void)
         return err;
     }
 
+    if (!s_imu_lock) {
+        s_imu_lock = xSemaphoreCreateMutex();
+    }
+
     ESP_LOGI(TAG, "accelerometer running at 50 Hz, +/-2 g");
     return ESP_OK;
 }
+
+/*
+ * The last sample, and the age past which it is worth taking another.
+ *
+ * The part is configured for 50 Hz above, so it produces a new value every
+ * 20 ms and no sooner. A caller asking twice inside that window is asking for
+ * a number the sensor has not measured yet - it costs an I2C transaction on a
+ * bus the touch task is also using, and returns the figure it returned last
+ * time. Measured on a Tab5, one of those reads takes 6.5 ms when it has to
+ * wait for the bus and 0.4 ms when it does not, so this is not a small saving
+ * for anything polling per frame.
+ *
+ * The cache does not make a stale reading fresher. It only stops the same
+ * reading being paid for twice, which is why the window is the part's own
+ * period and not a number chosen for how much it saves.
+ */
+#define SAMPLE_AGE_US 20000
 
 esp_err_t neos_orient_read(float *x, float *y, float *z)
 {
     if (!s_imu) {
         return ESP_ERR_INVALID_STATE;
     }
-    float ax = 0, ay = 0, az = 0;
-    esp_err_t err = bmi270_get_acce_data(s_imu, &ax, &ay, &az);
-    if (x) { *x = ax; }
-    if (y) { *y = ay; }
-    if (z) { *z = az; }
+    /*
+     * Held across the whole thing, because two tasks reading at once is the
+     * ordinary case here - a game polling per frame while the watcher looks
+     * for a flip - and a triple assembled from two different samples would be
+     * a gravity vector that never existed. Uncontended it is a few
+     * instructions; contended it is exactly the wait it is there to make safe.
+     */
+    if (s_imu_lock && xSemaphoreTake(s_imu_lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t err = ESP_OK;
+    const int64_t now = esp_timer_get_time();
+    if (s_sampled_us == 0 || now - s_sampled_us >= SAMPLE_AGE_US) {
+        float ax = 0, ay = 0, az = 0;
+        err = bmi270_get_acce_data(s_imu, &ax, &ay, &az);
+        if (err == ESP_OK) {
+            s_ax = ax;
+            s_ay = ay;
+            s_az = az;
+            s_sampled_us = now ? now : 1;
+        }
+    }
+    if (err == ESP_OK) {
+        if (x) { *x = s_ax; }
+        if (y) { *y = s_ay; }
+        if (z) { *z = s_az; }
+    }
+
+    if (s_imu_lock) {
+        xSemaphoreGive(s_imu_lock);
+    }
     return err;
 }
 

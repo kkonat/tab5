@@ -27,6 +27,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -75,6 +76,20 @@ static bool                   s_on;
  * make an unrelated setting into a dependency of every app that makes a noise.
  */
 static bool s_stream;
+
+/*
+ * What the cushion is measured against.
+ *
+ * esp_codec_dev has no "how much room is left" call, so the depth of the DMA
+ * queue is not observable directly. It does not have to be: while writes block
+ * until the hardware has taken them, sound handed over minus time elapsed is
+ * the same quantity, and both of those are countable here. s_t0 is set on the
+ * first write of a stream rather than on open, because an app that opens the
+ * codec and then spends a second loading a ROM has not underrun - it has not
+ * started.
+ */
+static int64_t  s_t0;
+static uint64_t s_frames;
 
 /* ------------------------------------------------------------------ */
 
@@ -265,6 +280,8 @@ bool neos_audio_open(void)
         return false;
     }
     s_stream = true;
+    s_t0 = 0;
+    s_frames = 0;
     ESP_LOGI(TAG, "app stream open");
     return true;
 }
@@ -284,10 +301,46 @@ int neos_audio_write(const int16_t *frames, int n)
      * own; one that cannot keep up finds out here, as a stall, rather than by
      * having a buffer quietly dropped underneath it.
      */
+    if (s_t0 == 0) {
+        s_t0 = esp_timer_get_time();
+    }
     if (esp_codec_dev_write(s_spk, (void *)frames, n * (int)sizeof(int16_t)) != ESP_OK) {
         return -1;
     }
+    s_frames += (uint64_t)n;
     return n;
+}
+
+/*
+ * How far ahead of the speaker the app is.
+ *
+ * Sound handed over, as a duration, minus the time since the first block went
+ * in. While the app is keeping up this settles at the depth of the codec's own
+ * queue and stays there, because neos_audio_write() blocks and so the app can
+ * never get further ahead than the hardware will hold. What it is for is the
+ * other case: an app about to do something expensive can ask whether it is
+ * being paid for out of the cushion or out of the sound.
+ *
+ * A stall drives it to zero and no further. Once the queue has run dry the
+ * time already lost is not a debt the app can repay - the speaker played
+ * silence and that silence is spent - so the baseline moves up instead and the
+ * next block starts from nothing. Letting it go negative would make an app
+ * that glitched once look permanently behind.
+ */
+int32_t neos_audio_lead_us(void)
+{
+    if (!s_stream || !s_spk || s_t0 == 0) {
+        return 0;
+    }
+    const int64_t played  = esp_timer_get_time() - s_t0;
+    const int64_t written = (int64_t)(s_frames * 1000000u / NEOS_AUDIO_RATE);
+    const int64_t lead    = written - played;
+
+    if (lead <= 0) {
+        s_t0 = esp_timer_get_time() - written;   /* re-base: the gap is spent */
+        return 0;
+    }
+    return (int32_t)lead;
 }
 
 bool neos_audio_gain(uint8_t percent)

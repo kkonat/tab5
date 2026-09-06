@@ -183,6 +183,13 @@ static void revoke_app_callbacks(void)
     neos_orient_unlock();
     neos_orient_stop_watch();
     neos_bar_set_closable(false);
+    /*
+     * And the panel itself, for the same reason: an app that took the whole
+     * screen is not necessarily the one that gives it back, and a crash
+     * fullscreen would otherwise leave the next app with no close button and
+     * nothing to explain why.
+     */
+    neos_fullscreen(false);
     neos_bar_init();          /* an app may have reserved its own */
     watch_orientation_for_os();
 }

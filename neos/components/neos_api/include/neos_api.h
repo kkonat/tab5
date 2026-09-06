@@ -108,6 +108,48 @@ int neos_file_write(const char *rel, const void *data, size_t len);
  */
 int neos_file_read(const char *rel, void *buf, size_t size);
 
+/**
+ * How long a file on the card is, in bytes.
+ *
+ * @return the length, or negative on failure with the same codes
+ *         neos_file_read() uses - -3 for no such file.
+ *
+ * Exists because the alternative is what apps were doing without it: offer
+ * neos_file_read() a buffer, be told -6, offer twice as much, and repeat.
+ * That costs an allocation and a stat per attempt and has to carry a ceiling
+ * chosen by guesswork, which is a decision about how large a file may be made
+ * in the wrong place. Ask first instead.
+ *
+ * The answer can be stale by the time it is used - the card is removable and
+ * nothing here holds it - so neos_file_read() still refuses a buffer that
+ * turned out too small rather than trusting this.
+ */
+int neos_file_size(const char *rel);
+
+/**
+ * Read @p len bytes from @p off in a file on the card.
+ *
+ * @param rel   path relative to the card root, as for neos_file_read().
+ * @param buf   filled with what was read
+ * @param len   how much to read
+ * @param off   where to start
+ * @return how many bytes were placed in @p buf, which is short of @p len only
+ *         at end of file, or negative on failure with neos_file_read()'s codes.
+ *
+ * The whole-file call is the right one for a settings file and the wrong one
+ * for a pack with several members in it: reading one member means holding the
+ * entire file somewhere first, so the large copy and the small one it is
+ * cut down to are both live at once, and the large one lands in PSRAM. With
+ * an offset each member is read straight to where it will be used.
+ *
+ * Still no handle: the file is opened, sought, read and closed inside the
+ * call, so a card pulled between two of these costs the second read and
+ * nothing else. That is the same trade neos_file_read() makes and the reason
+ * is in neos_file_write()'s comment - it just costs an open per member here,
+ * which is worth it against keeping a FILE* alive across app code.
+ */
+int neos_file_read_at(const char *rel, void *buf, size_t len, uint32_t off);
+
 /* ------------------------------------------------------------------ */
 /* Touch                                                               */
 /* ------------------------------------------------------------------ */
@@ -154,6 +196,48 @@ bool neos_touch_tap(int16_t *x, int16_t *y);
  * moved has to match by position itself.
  */
 int neos_touch_points(neos_touch_t *out, int max);
+
+/* ------------------------------------------------------------------ */
+/* Game mode                                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Take the whole panel: no system bar, and no close button but the app's own.
+ *
+ * For something that is a picture rather than a screenful of controls - a
+ * game, a viewer, an emulator - where 56 px along the top is both a tenth of
+ * the height and a piece of another program's furniture sitting on top of
+ * yours. ngl_app_area() becomes the whole panel, and nothing is clipped away
+ * from the top any more.
+ *
+ * What the app takes on with it is the way out. The bar's close button is the
+ * one control that is in the same place in every app, and this removes it, so
+ * an app that turns this on and does not draw its own has made itself
+ * unleavable. Draw the button first, then ask for the mode.
+ *
+ * Also switched off: the status line and the toasts, which have nowhere to go
+ * without a bar. neos_status_for() keeps working and does nothing, so an app
+ * does not have to guard every call.
+ *
+ * NeOS keeps a way back that costs no screen at all - four fingers held on the
+ * glass for a moment restores the bar and asks the app to close. That is the
+ * fullscreen equivalent of the close button and not a debugging aid: the touch
+ * task sees it before the app does, so an app cannot swallow it. It cannot
+ * rescue an app that has stopped polling neos_app_close_requested() - nothing
+ * can, since an app runs as ordinary code on the boot task - but it does cover
+ * the case this mode makes newly possible, which is a close button that was
+ * never drawn or was drawn somewhere unreachable.
+ *
+ * Process-wide state held on the app's behalf, like the orientation lock, so
+ * NeOS puts the bar back when the app returns however it returns. An app that
+ * crashes fullscreen does not leave the next one without a close button.
+ *
+ * @return true if the mode is now what was asked for.
+ */
+bool neos_fullscreen(bool on);
+
+/** Whether the panel currently belongs to the app. */
+bool neos_is_fullscreen(void);
 
 /* ------------------------------------------------------------------ */
 /* Text input                                                          */
@@ -208,6 +292,17 @@ typedef struct {
     char     entry[64];    /**< the .elf to load */
     uint32_t crashes;      /**< non-zero: quarantined, will not be run */
     bool     ok;           /**< manifest was readable and complete */
+    /*
+     * Which shelf the shell files this under - "Games", "Tools". Empty when
+     * the manifest does not say, which is not an error: what an unclassified
+     * app is called and where it goes is the shell's business, not the
+     * registry's, so nothing is invented here.
+     *
+     * Appended after `ok` rather than sorted in next to `desc`, because every
+     * offset above it is compiled into apps already on the card. See the
+     * assertions below.
+     */
+    char     category[24];
 } neos_app_t;
 
 /** Re-walk the card. Returns how many apps are on it. */
@@ -221,6 +316,30 @@ const neos_app_t *neos_apps_get(int idx);
 
 /** App by directory name, or NULL if the card has no such app. */
 const neos_app_t *neos_apps_find(const char *dir);
+
+/**
+ * Let @p dir run again after a crash quarantined it. True if it was.
+ *
+ * Quarantine is a safety net and not a verdict: NeOS counts a fault against
+ * whichever app the previous boot died inside, and refuses to launch it again,
+ * because an app that panics on its first frame would otherwise be picked up
+ * by autorun and panic again forever. What it cannot know is whether the fault
+ * has since been fixed - the usual case is exactly that, an app that crashed
+ * once and has been rebuilt and uploaded over the top of itself.
+ *
+ * So there has to be a way back, and it belongs to whoever is holding the
+ * tablet rather than to a rebuild: the same authority the close button has.
+ * The shell puts it behind a deliberate gesture so that it cannot be the
+ * accident that undoes the safety net.
+ *
+ * Clears the counter and updates the registry in place - no card walk, but
+ * neos_apps_generation() moves, so a shell that watches it redraws the card
+ * with its bomb replaced without being told anything else.
+ *
+ * A clean run clears the counter by itself, so an app let back out and then
+ * behaving needs nothing further. One that crashes again is quarantined again.
+ */
+bool neos_apps_unquarantine(const char *dir);
 
 /**
  * Bumped every time the registry is rebuilt.
@@ -243,3 +362,6 @@ _Static_assert(offsetof(neos_app_t, desc)    ==  80, "neos_app_t layout is froze
 _Static_assert(offsetof(neos_app_t, entry)   == 176, "neos_app_t layout is frozen for ABI v1");
 _Static_assert(offsetof(neos_app_t, crashes) == 240, "neos_app_t layout is frozen for ABI v1");
 _Static_assert(offsetof(neos_app_t, ok)      == 244, "neos_app_t layout is frozen for ABI v1");
+/* Appended at 1.15. Everything above it kept its offset, which is what makes
+   that a minor rather than a major. */
+_Static_assert(offsetof(neos_app_t, category) == 245, "neos_app_t layout is frozen for ABI v1");

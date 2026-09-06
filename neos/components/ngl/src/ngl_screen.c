@@ -713,3 +713,257 @@ void ngl_overlay_end(void)
     s_back.clip = s_ov_begin_clip;
     NGL_UNLOCK();
 }
+
+
+/* ------------------------------------------------------------------ */
+/* The PPA, for anyone but the flush path                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * What it takes to hand a rectangle to the PPA instead of a loop.
+ *
+ * The engine reads and writes by DMA, so the CPU's view and memory's view have
+ * to be made to agree twice: everything the caller drew has to be out of cache
+ * before the read, and everything the engine wrote has to be out of cache
+ * before the next read of it. That is the whole reason this is not simply a
+ * call to the driver.
+ *
+ * The alignment test is what keeps that safe rather than approximately safe.
+ * Cache maintenance works in 64-byte lines, and a range that starts or ends
+ * mid-line takes the neighbouring bytes with it - invalidating a line that
+ * happens to hold the dirty tail of some other allocation loses that write,
+ * silently, in a way that shows up as one wrong pixel somewhere else entirely.
+ * Rather than widen the range and hope, a buffer whose rows do not sit on line
+ * boundaries is simply not eligible and the caller falls back to software.
+ * ngl_surface_new() rounds its stride up so that its own surfaces always are.
+ */
+#define PPA_MIN_SCALE 0.0625f
+#define PPA_MAX_SCALE 16.0f
+
+static bool ppa_eligible(const ngl_surface_t *s)
+{
+    const size_t row = (size_t)s->stride * sizeof(ngl_color_t);
+    return ((uintptr_t)s->px & 63u) == 0 && (row & 63u) == 0;
+}
+
+/*
+ * Whole rows, on line boundaries by the test above, so no rounding is needed.
+ *
+ * ESP_ERR_INVALID_ARG here is not a failure and treating it as one would be a
+ * bug that hid itself: it means the address is not one the cache covers, which
+ * is the answer for internal RAM, which is where the buffer worth scaling from
+ * lives. Nothing to write back and nothing to invalidate is a success - the
+ * CPU and the engine are already looking at the same bytes. Any other error is
+ * real, and then the caller does it in software rather than racing the DMA.
+ */
+static bool sync_rows(const ngl_surface_t *s, int16_t y, int16_t h, int flags)
+{
+    const size_t row = (size_t)s->stride * sizeof(ngl_color_t);
+    const esp_err_t err = esp_cache_msync((uint8_t *)s->px + (size_t)y * row,
+                                          (size_t)h * row, flags);
+    return err == ESP_OK || err == ESP_ERR_INVALID_ARG;
+}
+
+/*
+ * One PPA client, and it may only have one operation in flight.
+ *
+ * That is the driver's rule and it is the reason this takes the screen lock,
+ * which nothing else in the drawing path does. flush_one() runs under it
+ * already - every caller reaches that through ngl_flush(), ngl_bar_end() or
+ * ngl_overlay_end(), all of which hold it - so the flushes were serialised
+ * against each other and this was the one PPA user outside the fence.
+ *
+ * It stayed harmless only for as long as nothing called it. The bar animates
+ * from the status task and the app draws from its own, so an app scaling a
+ * frame onto the panel at 60 Hz while a toast is marqueeing is two tasks
+ * handing work to one client, and the second one is not queued behind the
+ * first, it is submitted on top of it - which ends as a blocking wait on a
+ * completion that has already been taken by the other caller.
+ *
+ * Recursive, so a caller that already holds the lock - anything drawing inside
+ * an ngl_bar_begin() or ngl_overlay_begin() pair - passes straight through.
+ */
+void ngl_panel_size(int16_t *w, int16_t *h)
+{
+    if (w) { *w = s_pw; }
+    if (h) { *h = s_ph; }
+}
+
+/*
+ * As sync_rows(), but over a plain address range rather than a surface: the
+ * panel framebuffer is not one, and its rows are 720 pixels - 1440 bytes,
+ * which is not a whole number of cache lines. flush_one() has the same problem
+ * and solves it the same way, with UNALIGNED, which lets the driver widen the
+ * range to line boundaries itself.
+ *
+ * That widening is safe here for the reason it is safe there: the range is
+ * whole panel rows, so the only bytes it reaches beyond the rectangle are the
+ * ends of rows nothing else is writing.
+ */
+static bool sync_mem(void *p, size_t len, int flags)
+{
+    const esp_err_t err = esp_cache_msync(p, len, flags | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    return err == ESP_OK || err == ESP_ERR_INVALID_ARG;
+}
+
+bool ngl_panel_scale(const ngl_surface_t *src, ngl_rect_t sr, ngl_rect_t dr,
+                     bool mirror_x, bool mirror_y)
+{
+    if (!s_ready || !s_ppa || !s_fb || !src || !src->px) {
+        return false;
+    }
+    if (sr.w <= 0 || sr.h <= 0 || dr.w <= 0 || dr.h <= 0) {
+        return false;
+    }
+    /* Panel coordinates, and clipped to nothing rather than clamped: a caller
+       that got the rectangle wrong wants to find out, not to be shown most of
+       its picture. */
+    if (dr.x < 0 || dr.y < 0 || dr.x + dr.w > s_pw || dr.y + dr.h > s_ph) {
+        return false;
+    }
+    if (sr.x < 0 || sr.y < 0 || sr.x + sr.w > src->w || sr.y + sr.h > src->h) {
+        return false;
+    }
+    /* Exactness, for the reason in ngl_ppa_scale(): a ratio the engine cannot
+       hold in sixteenths writes a block of a different size from the one that
+       was reserved, and here that would land on the panel. */
+    if ((16 * (int)dr.w) % (int)sr.w || (16 * (int)dr.h) % (int)sr.h) {
+        return false;
+    }
+    const float scale_x = (float)dr.w / (float)sr.w;
+    const float scale_y = (float)dr.h / (float)sr.h;
+    if (scale_x < PPA_MIN_SCALE || scale_x > PPA_MAX_SCALE ||
+        scale_y < PPA_MIN_SCALE || scale_y > PPA_MAX_SCALE) {
+        return false;
+    }
+
+    NGL_LOCK();
+
+    const size_t srow = (size_t)src->stride * sizeof(ngl_color_t);
+    const size_t frow = (size_t)s_pw * sizeof(ngl_color_t);
+
+    /* The source because the caller composed it with the CPU; the destination
+       because a dirty line still sitting over the panel would be written back
+       afterwards, on top of what the engine put there. */
+    if (!sync_mem((uint8_t *)src->px + (size_t)sr.y * srow, (size_t)sr.h * srow,
+                  ESP_CACHE_MSYNC_FLAG_DIR_C2M) ||
+        !sync_mem((uint8_t *)s_fb + (size_t)dr.y * frow, (size_t)dr.h * frow,
+                  ESP_CACHE_MSYNC_FLAG_DIR_C2M)) {
+        NGL_UNLOCK();
+        return false;
+    }
+
+    const ppa_srm_oper_config_t op = {
+        .in = {
+            .buffer = src->px,
+            .pic_w = (uint32_t)src->stride, .pic_h = (uint32_t)src->h,
+            .block_w = (uint32_t)sr.w,      .block_h = (uint32_t)sr.h,
+            .block_offset_x = (uint32_t)sr.x, .block_offset_y = (uint32_t)sr.y,
+            .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        .out = {
+            .buffer = s_fb,
+            .buffer_size = (uint32_t)((size_t)s_pw * s_ph * sizeof(ngl_color_t)),
+            .pic_w = (uint32_t)s_pw, .pic_h = (uint32_t)s_ph,
+            .block_offset_x = (uint32_t)dr.x, .block_offset_y = (uint32_t)dr.y,
+            .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        /* No rotation, ever - that is the entire point of this function. A
+           mirror reverses the order pixels are read within a row and leaves
+           the writes sequential, so it is free where a rotate is not. */
+        .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
+        .scale_x = scale_x, .scale_y = scale_y,
+        .mirror_x = mirror_x, .mirror_y = mirror_y,
+        .mode = PPA_TRANS_MODE_BLOCKING,
+    };
+    const bool ok = (ppa_do_scale_rotate_mirror(s_ppa, &op) == ESP_OK);
+
+    /*
+     * No invalidate afterwards, and no ngl_dirty(): this is the panel, nothing
+     * downstream reads it back, and there is no flush to schedule. It is also
+     * why the back buffer is now out of date over this rectangle - see the
+     * header.
+     */
+    NGL_UNLOCK();
+    return ok;
+}
+
+bool ngl_ppa_scale(ngl_surface_t *dst, ngl_rect_t dr,
+                   const ngl_surface_t *src, ngl_rect_t sr)
+{
+    if (!s_ppa || !ppa_eligible(dst) || !ppa_eligible(src)) {
+        return false;
+    }
+
+    /*
+     * The engine's scale factor is a whole number of sixteenths, and what it
+     * writes is the input block times whatever factor it ended up with - not
+     * the rectangle that was asked for. A ratio it cannot hold exactly is
+     * therefore not a slightly worse picture, it is a picture one pixel wider
+     * or narrower than the caller reserved, spilling over the edge of the
+     * frame or leaving a seam down it. So the test is exactness and not
+     * closeness: sixteen times the destination has to divide by the source,
+     * which is both "representable in sixteenths" and "multiplies back to the
+     * width asked for" in one integer operation. Everything else is a loop,
+     * where the fraction can be carried properly.
+     */
+    if ((16 * (int)dr.w) % (int)sr.w || (16 * (int)dr.h) % (int)sr.h) {
+        return false;
+    }
+    const float sx = (float)dr.w / (float)sr.w;
+    const float sy = (float)dr.h / (float)sr.h;
+    if (sx < PPA_MIN_SCALE || sx > PPA_MAX_SCALE ||
+        sy < PPA_MIN_SCALE || sy > PPA_MAX_SCALE) {
+        return false;
+    }
+
+    NGL_LOCK();
+
+    /*
+     * Both directions before the op. The source because the caller composed it
+     * with the CPU and the engine reads memory; the destination because a dirty
+     * line still sitting over it would be written back afterwards and land on
+     * top of what the engine put there.
+     */
+    const int c2m = ESP_CACHE_MSYNC_FLAG_DIR_C2M;
+    if (!sync_rows(src, sr.y, sr.h, c2m) || !sync_rows(dst, dr.y, dr.h, c2m)) {
+        NGL_UNLOCK();
+        return false;
+    }
+
+    const ppa_srm_oper_config_t op = {
+        .in = {
+            .buffer = src->px,
+            .pic_w = (uint32_t)src->stride, .pic_h = (uint32_t)src->h,
+            .block_w = (uint32_t)sr.w,      .block_h = (uint32_t)sr.h,
+            .block_offset_x = (uint32_t)sr.x, .block_offset_y = (uint32_t)sr.y,
+            .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        .out = {
+            .buffer = dst->px,
+            .buffer_size = (uint32_t)((size_t)dst->stride * dst->h * sizeof(ngl_color_t)),
+            .pic_w = (uint32_t)dst->stride, .pic_h = (uint32_t)dst->h,
+            .block_offset_x = (uint32_t)dr.x, .block_offset_y = (uint32_t)dr.y,
+            .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
+        .scale_x = sx, .scale_y = sy,
+        .mode = PPA_TRANS_MODE_BLOCKING,
+    };
+    if (ppa_do_scale_rotate_mirror(s_ppa, &op) != ESP_OK) {
+        NGL_UNLOCK();
+        return false;
+    }
+
+    /*
+     * And back the other way, or the flush would push the cached copy of what
+     * was there before. Every line over this range was written back above, so
+     * there is nothing dirty left for the invalidate to throw away.
+     */
+    if (!sync_rows(dst, dr.y, dr.h, ESP_CACHE_MSYNC_FLAG_DIR_M2C)) {
+        ESP_LOGW(TAG, "PPA scale wrote %dx%d but the cache would not be invalidated",
+                 dr.w, dr.h);
+    }
+    NGL_UNLOCK();
+    return true;
+}

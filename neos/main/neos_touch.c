@@ -139,6 +139,50 @@ static bool bar_took_it(int16_t x, int16_t y)
     }
 }
 
+/*
+ * The way out of a fullscreen app, and it costs no screen at all.
+ *
+ * An app that has taken the panel has taken the close button with it, so the
+ * one control that is in the same place in every app is gone and the only one
+ * left is one the app drew - which is fine until it drew it wrong, or under a
+ * finger, or not at all. This is the replacement, and it is seen here in the
+ * touch task before the app is told about any of it, so an app cannot swallow
+ * it the way it could swallow a tap in a corner.
+ *
+ * Four fingers, because two are already on the glass in anything played with
+ * thumbs and three is a plausible fumble; four flat on the panel is not
+ * something that happens by accident. Held rather than tapped for the same
+ * reason.
+ *
+ * It does both halves: the bar comes back, so the system's own close button is
+ * there to be pressed even if the app carries on regardless, and the app is
+ * asked to close, which is what a well-behaved one acts on. Neither can help
+ * against an app that has stopped polling - it is running on the boot task as
+ * ordinary code and there is nothing to preempt - and the bar's own button
+ * could not either.
+ */
+#define ESCAPE_FINGERS 4
+#define ESCAPE_MS    800
+
+static void escape_watch(int n)
+{
+    static uint32_t held_ms;
+
+    if (n < ESCAPE_FINGERS || !neos_is_fullscreen()) {
+        held_ms = 0;
+        return;
+    }
+    held_ms += POLL_MS;
+    if (held_ms < ESCAPE_MS) {
+        return;
+    }
+    held_ms = 0;
+
+    ESP_LOGI(TAG, "%d fingers held - taking the panel back", n);
+    neos_fullscreen(false);
+    neos_app_request_close();
+}
+
 static void touch_task(void *arg)
 {
     (void)arg;
@@ -148,6 +192,8 @@ static void touch_task(void *arg)
         int16_t xs[NEOS_TOUCH_MAX], ys[NEOS_TOUCH_MAX];
         const int n = read_points(xs, ys);
         const bool down = n > 0;
+
+        escape_watch(n);
 
         if (down) {
             for (int i = 0; i < n; i++) {

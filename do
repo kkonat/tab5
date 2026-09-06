@@ -117,7 +117,7 @@ usage() {
     for name in $(ls "$dir" | sed -n 's/\.\(py\|sh\|ps1\)$//p' | grep -v '^_' | grep -vx 'env' | sort -u); do
         for path in "$dir/$name".py "$dir/$name".sh "$dir/$name".ps1; do
             [ -f "$path" ] || continue
-            printf '  %-14s %.58s\n' "$name" "$(summary "$path")"
+            printf '  %-15s %.57s\n' "$name" "$(summary "$path")"
             break
         done
     done

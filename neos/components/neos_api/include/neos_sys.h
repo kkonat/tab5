@@ -83,6 +83,20 @@ uint8_t  neos_cores(void);
 uint64_t neos_uptime_ms(void);
 
 /**
+ * Microseconds since boot, from the same timer neos_uptime_ms() divides down.
+ *
+ * Milliseconds cannot describe a 16.6 ms frame: a budget measured in them is
+ * a number between 16 and 17, and the interesting part of an emulator's loop
+ * is the part that rounds away. This is the raw counter, for pacing a frame
+ * and for finding out where the time went inside one.
+ *
+ * Subtracting two of these is free, but dividing one in an app is not - see
+ * neos_uptime_s() for why. Anything that wants a rate should scale the
+ * difference, which fits in 32 bits for over an hour.
+ */
+uint64_t neos_uptime_us(void);
+
+/**
  * The same thing in seconds.
  *
  * Not a convenience. Apps link -nostdlib and resolve against the syscall
@@ -106,6 +120,27 @@ uint32_t neos_heap_free(void);
 uint32_t neos_heap_total(void);
 uint32_t neos_psram_free(void);
 uint32_t neos_psram_total(void);
+
+/**
+ * Allocate @p n bytes of internal SRAM, 64-byte aligned. Released with free().
+ *
+ * malloc() on this machine is PSRAM for anything over a kilobyte, which is the
+ * right default - there are 32 MB of it and 32 MB is what makes an app able to
+ * hold a picture. It is the wrong default for the few bytes an app touches
+ * millions of times a second: an emulator's address space, its tile ROM, the
+ * frame it is composing. Those want to be in the internal pool, where a miss
+ * costs a cache line and not a PSRAM burst.
+ *
+ * NULL when the pool cannot cover it, and deliberately not a quiet fall back
+ * to PSRAM: an app that asked for this asked because the difference matters,
+ * and one that is silently given the slow memory has no way to find out. Check
+ * neos_heap_free() first if the answer changes what you would allocate.
+ *
+ * The alignment is a cache line, so a block from here can be a PPA source -
+ * see ngl_blit_scale(). Internal RAM is scarce; this is not the allocator to
+ * reach for by default.
+ */
+void *neos_alloc_fast(size_t n);
 
 /* ------------------------------------------------------------------ */
 /* Sensors                                                             */
@@ -225,6 +260,27 @@ bool neos_audio_open(void);
  * here rather than by discovering its buffer was dropped.
  */
 int neos_audio_write(const int16_t *frames, int n);
+
+/**
+ * Microseconds of sound handed over that the speaker has not played yet.
+ *
+ * The cushion, in other words, and the only thing worth knowing before
+ * deciding whether there is room to do something expensive this frame. An app
+ * driving itself off neos_audio_write() is asleep inside that call whenever it
+ * is ahead; what it cannot tell from there is how far ahead, and so whether
+ * the full repaint it was about to do will be paid for out of the cushion or
+ * out of the sound.
+ *
+ * Zero means the next block is already late. There is no free-space query
+ * underneath this - the codec layer does not offer one - so the figure is the
+ * sound written minus the time elapsed, which is the same quantity as long as
+ * writes block, and is re-based rather than allowed to go negative when they
+ * have not kept up.
+ *
+ * Zero when no stream is open, so an app that never opened one is not a
+ * special case.
+ */
+int32_t neos_audio_lead_us(void);
 
 /**
  * Output level, 0-100, applied to the codec and so to whatever plays next.

@@ -395,6 +395,108 @@ void ngl_blit(ngl_surface_t *dst, int16_t x, int16_t y,
 void ngl_blit_key(ngl_surface_t *dst, int16_t x, int16_t y,
                  const ngl_surface_t *src, const ngl_rect_t *src_rect, ngl_color_t key);
 
+/**
+ * Copy `src_rect` of `src` (NULL = all of it) into `dst_rect`, scaling to fit.
+ *
+ * Nearest-neighbour, so a 2x or 3x blow-up of something drawn at 224x288 comes
+ * out as clean squares rather than a blur - which is what that sort of picture
+ * wants. Non-integer factors work and look like nearest-neighbour looks.
+ *
+ * The P4's PPA does this over DMA when it can, and then the scale costs no CPU
+ * at all: the interesting case is an emulator or a viewer that composes a small
+ * frame in fast memory every frame and wants it on a 1280x720 panel, where the
+ * software version would be a quarter of a million stores into PSRAM. The
+ * software path is still there and still correct, so this always works - the
+ * return value says whether the whole rectangle was covered, not which path
+ * ran.
+ *
+ * False if nothing was drawn: an empty rectangle, a clip that excluded it, or
+ * a surface that is not there. A partially clipped blit draws the visible part
+ * and returns true.
+ *
+ * `src` may be an ngl_surface_wrap() of ordinary memory, which is the usual
+ * way in - wrap the buffer the frame was composed in and hand it over.
+ */
+bool ngl_blit_scale(ngl_surface_t *dst, ngl_rect_t dst_rect,
+                   const ngl_surface_t *src, const ngl_rect_t *src_rect);
+
+/**
+ * Blit 8-bit palette indices through `pal`, converting to RGB565 per pixel.
+ *
+ * @param src     w*h indices, `stride` of them per row (0 = w)
+ * @param pal     256 colours; an index past the end of a shorter table is the
+ *                caller's bug and reads whatever is behind it
+ * @param key     an index to treat as transparent, or -1 for none
+ *
+ * Machines that draw in indices are the rule and not the exception - a tile
+ * ROM, a paletted image, anything with a colour table that changes without the
+ * picture changing - and every one of them converts index to pixel once per
+ * pixel per frame. That loop belongs on this side: an app carries no copy of
+ * it, and it is compiled once here rather than out of PSRAM in each app that
+ * needed it.
+ *
+ * Takes a raw pointer rather than a surface because ngl surfaces are RGB565
+ * throughout and there is no reason to make indices pretend otherwise.
+ */
+void ngl_blit_p8(ngl_surface_t *dst, int16_t x, int16_t y,
+                const uint8_t *src, int16_t w, int16_t h, int16_t stride,
+                const ngl_color_t *pal, int key);
+
+/* ------------------------------------------------------------------ */
+/* Straight to the panel                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The panel's own size, which does not change when the screen rotates.
+ *
+ * ngl_screen() is the rotated, logical frame - 1280x720 in landscape. This is
+ * the glass: 720x1280 always. Only something addressing the panel directly
+ * needs it, which means only ngl_panel_scale().
+ */
+void ngl_panel_size(int16_t *w, int16_t *h);
+
+/**
+ * Scale @p src onto the panel itself, with no rotation and no back buffer.
+ *
+ * The escape hatch for one specific shape of program: something that composes
+ * a small picture every frame and wants it large on the glass. The ordinary
+ * path - ngl_blit_scale() then ngl_flush() - writes that picture large twice,
+ * once into the back buffer and once again into the panel, and the second of
+ * those is a rotation.
+ *
+ * The rotation is the expensive half, and by a long way. Measured on a Tab5 at
+ * 720x960: the scale runs at 85 Mpixels/s and the 1:1 rotate that follows it
+ * at 19. A 90 degree rotate writes a column where it read a row, so every
+ * output pixel lands a panel row away from the last one and PSRAM never gets
+ * to burst. Four and a half times the cost of the same pixels written in
+ * order.
+ *
+ * So this does neither. @p dst_rect is in *panel* coordinates and the caller
+ * is expected to have composed @p src already turned - which for a 4:3
+ * playfield is a coordinate swap in the drawing helpers and costs nothing at
+ * the size the picture is composed at. Turning 43,200 pixels on the way in is
+ * free; turning 691,200 on the way out is 36 ms.
+ *
+ * @param mirror_x,mirror_y  reverse the source along that axis, which is how
+ *        one composed picture serves both landscape rotations: NGL_ROT_270 is
+ *        NGL_ROT_90 with both axes flipped, and a mirror still writes each row
+ *        in order, so it costs nothing the way a rotate does.
+ *
+ * The destination scale must be a whole number of sixteenths of the source, as
+ * for ngl_blit_scale(), and there is deliberately no software fallback: the
+ * loop this would need writes a megabyte into the live framebuffer a pixel at
+ * a time, and a caller that quietly got that instead would be slower than the
+ * ordinary path it came here to avoid. False means "did nothing".
+ *
+ * Nothing is marked dirty and no flush is needed - this *is* the panel. What
+ * it costs instead is that ngl's back buffer no longer matches the glass over
+ * @p dst_rect, so anything that restores pixels from it - a modal panel
+ * closing - will restore what was there before. A caller doing this owns the
+ * repaint afterwards; neos_ui_busy() going false is the edge to watch.
+ */
+bool ngl_panel_scale(const ngl_surface_t *src, ngl_rect_t src_rect,
+                    ngl_rect_t dst_rect, bool mirror_x, bool mirror_y);
+
 /* ------------------------------------------------------------------ */
 /* Text                                                                */
 /* ------------------------------------------------------------------ */

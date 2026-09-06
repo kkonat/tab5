@@ -146,6 +146,17 @@ static ngl_rect_t status_rect(void)
 
 neos_bar_hit_t neos_bar_hit(int16_t x, int16_t y)
 {
+    /*
+     * No bar, no buttons - and this has to be said here rather than left to
+     * the rectangles, because they do not all collapse when the bar does.
+     * close_rect() takes its height from BAR_BTN and only its position from
+     * the bar, so at zero height it is still a real rectangle straddling the
+     * top-right corner: an invisible close button sitting inside a fullscreen
+     * app, in the exact place a game is most likely to put its own.
+     */
+    if (ngl_bar_height() <= 0) {
+        return NEOS_BAR_NONE;
+    }
     /* TRACE: what the bar believes its own geometry is at the moment a tap is
        tested against it. Remove with the matching block in neos_touch.c. */
     {
@@ -348,6 +359,51 @@ void neos_bar_init(void)
     }
 
     ESP_LOGI(TAG, "system bar reserved, %d px, build %s", BAR_H, build_version());
+}
+
+/* ------------------------------------------------------------------ */
+/* Game mode                                                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Handing the top 56 px back to the app, and taking them again afterwards.
+ *
+ * The whole mechanism is the reservation: ngl_reserve_top(0, NULL) widens the
+ * screen clip to the full panel and leaves nothing for ngl_clear() to repaint
+ * a bar into, and neos_bar_hit() then tests taps against rectangles of zero
+ * height, which nothing is inside - so the bar's buttons stop answering
+ * without any separate switch for that. Everything else here is bookkeeping so
+ * that the way back is not the app's responsibility.
+ *
+ * s_fullscreen is what the touch task reads to arm the four-finger escape.
+ * Kept here rather than there because this is the thing that knows, and a
+ * second copy of it in the touch layer is a second thing to get wrong when an
+ * app exits without turning the mode off.
+ */
+static bool s_fullscreen;
+
+bool neos_fullscreen(bool on)
+{
+    if (on == s_fullscreen) {
+        return true;
+    }
+    s_fullscreen = on;
+
+    if (on) {
+        ngl_reserve_top(0, NULL);
+        ESP_LOGI(TAG, "system bar released - the app owns the panel");
+    } else {
+        neos_bar_init();
+        ngl_bar_paint();
+        ESP_LOGI(TAG, "system bar back");
+    }
+    ngl_dirty_all();      /* the app area changed shape; everything repaints */
+    return true;
+}
+
+bool neos_is_fullscreen(void)
+{
+    return s_fullscreen;
 }
 
 void neos_bar_set_closable(bool closable)

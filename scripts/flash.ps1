@@ -66,8 +66,10 @@ if (-not (Test-Path (Join-Path $project 'CMakeLists.txt'))) {
 # --- the IDF ------------------------------------------------------------------
 $idf = Enter-NeosIdfEnv
 if (-not $idf) {
-    Die ('no ESP-IDF found. Set IDF_PATH (and IDF_TOOLS_PATH if the tools are ' +
-         'somewhere unusual) in .env.local - see .env.local.example')
+    Die ('no ESP-IDF found. Run: .\do.ps1 setup-toolchain -Check - which says ' +
+         'whether there is one to point at or one to install. Or set IDF_PATH ' +
+         '(and IDF_TOOLS_PATH if the tools are somewhere unusual) in .env.local ' +
+         'by hand - see .env.local.example')
 }
 $py = Find-NeosIdfTool 'python'
 if (-not $py) { Die "no IDF python under $(Get-NeosToolsPath)" }

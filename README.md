@@ -75,7 +75,7 @@ the table can be reordered and grown freely and older apps keep running. An app
 that draws with `ngl` carries none of it — `hello` is a couple of kilobytes on
 the card.
 
-**The ABI is versioned honestly.** `NEOS_ABI_MAJOR.MINOR`, currently 1.14; see
+**The ABI is versioned honestly.** `NEOS_ABI_MAJOR.MINOR`, currently 1.15; see
 [neos_abi.h](neos/components/neos_api/include/neos_abi.h). Minor is additive.
 The firmware defines one small object per released minor and an app emits a
 reference to the single row it was built against, so the *linker and the
@@ -114,7 +114,8 @@ apps showing the weather should not be able to disagree about it.
 | [neos/components/ngl/](neos/components/ngl/) | The graphics library, exported to apps. |
 | [neos/components/neos_api/](neos/components/neos_api/) | The ABI headers — the whole app-visible surface. |
 | [apps/](apps/) | Apps, one IDF project each: `launcher`, `hello`, `clock`, `mandel`, `matrix`, `system`, `nupogodi`. |
-| [scripts/](scripts/) | Upload, screenshot, boot capture, card deploy, ABI check, stock-flash restore. |
+| `lab/` | Not here. An app that is not ready to publish is kept in a separate private repo, cloned to `lab/` and gitignored; the build, upload and card scripts look there as well as in `apps/`. An app is at the same depth either way, so publishing one is a move. |
+| [scripts/](scripts/) | Toolchain setup, build, flash, upload, screenshot, boot capture, card deploy, ABI check, stock-flash restore. Every one of them, with its invocations, in [scripts/SCRIPTS.md](scripts/SCRIPTS.md). |
 | [tools/](tools/) | Build-time generators for fonts, icons and glyphs, and the emulator's artwork. Their output is checked in, except genlcd's, which is not ours. |
 | [docs/specs_fingerprint.md](docs/specs_fingerprint.md) | The hardware, read off this unit rather than off a datasheet. |
 | [original_flash/](original_flash/) | The stock M5Stack image, so the tablet can always be put back. |
@@ -159,7 +160,38 @@ are the part worth committing.
 
 ## Building
 
-ESP-IDF v5.4.2, target `esp32p4`.
+ESP-IDF v5.4.2, target `esp32p4`. On a machine that has not built this before:
+
+```powershell
+.\do.ps1 setup-toolchain -Check            # what IDF is here, if any
+.\do.ps1 setup-toolchain                   # install v5.4.2 and record it
+```
+
+It lists every IDF checkout it can find with its version, says which one the
+scripts would pick, and writes `IDF_PATH` / `IDF_TOOLS_PATH` into `.env.local`.
+A download only happens when there is genuinely no v5.4.2 to point at, and it
+asks first.
+
+The whole repo at once — the firmware, every app, the ABI check, and, with
+`flash-os`, the tablet and the card as well:
+
+```powershell
+.\do.ps1 build-all                         # eight projects, then abi_check
+.\do.ps1 build-all -Quiet -Apps clock      # one app, one line of output
+.\do.ps1 flash-os                          # build, flash, fill the card
+```
+
+`build-all` reads which apps exist from `apps/`, and knows that an app build
+ends in a linker error it should ignore — see below. The rest of this section is
+what it does, for when one project is all that is wanted.
+
+Each app is a separate IDF project, so each compiles the whole IDF — a thousand
+objects, 186 MB of build tree — to link an ELF of a couple of KB against
+`libmain.a` alone. Since the seven sdkconfigs are identical that is one build
+done seven times, and `build-all` runs ccache over it: the first app compiles
+902 files in 211 s, the next hits cache on 98% of them and takes 78 s.
+[scripts/SCRIPTS.md](scripts/SCRIPTS.md) has the two settings it took to get
+that from 0%.
 
 ```bash
 cd neos
@@ -283,8 +315,13 @@ plus a `manifest.json`, which is what the card carries next to the ELF:
 
 ```json
 { "schema": 1, "id": "com.kk.hello", "name": "Hello",
-  "type": "elf", "entry": "app.elf", "api": 2 }
+  "type": "elf", "entry": "app.elf", "category": "Other", "api": 2 }
 ```
+
+`category` is which of the launcher's tabs the app appears under — `System`,
+`Tools`, `Games`, `Sound`, `EyeCandy` or `Other`, matched without regard to
+case. Leave it out and the app lands on `Other`; an app is never hidden for not
+naming a shelf.
 
 The project's `CMakeLists.txt` differs from an ordinary IDF one in two places:
 

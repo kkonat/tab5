@@ -181,6 +181,12 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     /* ngl: blitting */
     ESP_ELFSYM_EXPORT(ngl_blit),
     ESP_ELFSYM_EXPORT(ngl_blit_key),
+    ESP_ELFSYM_EXPORT(ngl_blit_scale),
+    /* Straight to the glass, for something composing a small picture every
+       frame - it skips the back buffer and the rotation with it. See ngl.h. */
+    ESP_ELFSYM_EXPORT(ngl_panel_scale),
+    ESP_ELFSYM_EXPORT(ngl_panel_size),
+    ESP_ELFSYM_EXPORT(ngl_blit_p8),
 
     /* ngl: text */
     ESP_ELFSYM_EXPORT(ngl_text),
@@ -201,10 +207,14 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     ESP_ELFSYM_EXPORT(neos_cores),
     ESP_ELFSYM_EXPORT(neos_uptime_ms),
     ESP_ELFSYM_EXPORT(neos_uptime_s),
+    ESP_ELFSYM_EXPORT(neos_uptime_us),
     ESP_ELFSYM_EXPORT(neos_heap_free),
     ESP_ELFSYM_EXPORT(neos_heap_total),
     ESP_ELFSYM_EXPORT(neos_psram_free),
     ESP_ELFSYM_EXPORT(neos_psram_total),
+    /* Internal RAM by request, for the bytes an app touches millions of times
+       a second. malloc() is PSRAM past a kilobyte and stays the default. */
+    ESP_ELFSYM_EXPORT(neos_alloc_fast),
 
     /* sensors */
     ESP_ELFSYM_EXPORT(neos_imu_accel_mg),
@@ -270,6 +280,7 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     /* the speaker, for an app that generates its own sound */
     ESP_ELFSYM_EXPORT(neos_audio_open),
     ESP_ELFSYM_EXPORT(neos_audio_write),
+    ESP_ELFSYM_EXPORT(neos_audio_lead_us),
     ESP_ELFSYM_EXPORT(neos_audio_gain),
     ESP_ELFSYM_EXPORT(neos_audio_close),
 
@@ -288,6 +299,8 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     /* the card, for an app that has something to keep */
     ESP_ELFSYM_EXPORT(neos_file_write),
     ESP_ELFSYM_EXPORT(neos_file_read),
+    ESP_ELFSYM_EXPORT(neos_file_size),
+    ESP_ELFSYM_EXPORT(neos_file_read_at),
 
     /* the boot chain: how one app hands over to the next */
     ESP_ELFSYM_EXPORT(neos_exec),
@@ -298,6 +311,14 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     ESP_ELFSYM_EXPORT(neos_apps_get),
     ESP_ELFSYM_EXPORT(neos_apps_find),
     ESP_ELFSYM_EXPORT(neos_apps_generation),
+    /* The shell's way of letting a crashed app be tried again. Quarantine has
+       to be undoable by the person holding the tablet - see neos_api.h. */
+    ESP_ELFSYM_EXPORT(neos_apps_unquarantine),
+
+    /* Game mode: the app takes the whole panel and draws its own way out.
+       Undone by NeOS when the app returns - see neos_api.h. */
+    ESP_ELFSYM_EXPORT(neos_fullscreen),
+    ESP_ELFSYM_EXPORT(neos_is_fullscreen),
 
     /* the system bar is owned by whichever app is the shell */
     ESP_ELFSYM_EXPORT(ngl_reserve_top),

@@ -394,7 +394,7 @@ dependencies:
   espressif/usb:
     dependencies: []
     source:
-      path: C:\ESP-IDF\esp-idf\v5.4.2\esp-idf\components\usb
+      path: C:\Users\mieczu\esp-idf\v5.4.2\esp-idf\components\usb
       type: local
     version: '*'
   espressif/usb_host_uvc:

@@ -112,8 +112,8 @@ function Show-Usage {
         Sort-Object BaseName |
         ForEach-Object {
             $summary = Get-Summary $_.FullName
-            if ($summary.Length -gt 58) { $summary = $summary.Substring(0, 55) + '...' }
-            Write-Host ('  {0,-14} {1}' -f $_.BaseName, $summary)
+            if ($summary.Length -gt 57) { $summary = $summary.Substring(0, 54) + '...' }
+            Write-Host ('  {0,-15} {1}' -f $_.BaseName, $summary)
         }
     Write-Host ''
     Write-Host '  Arguments after the name go to the script: .\do.ps1 screencap --help'

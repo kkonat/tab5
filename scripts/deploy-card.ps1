@@ -10,6 +10,9 @@
     Nothing on the card is deleted: apps not listed here are left alone, so a
     card can carry apps that are not in this repo.
 
+    What goes on it is the list below, plus everything in lab/ - the private
+    repo of apps that are not published yet - when this checkout has one.
+
 .PARAMETER Drive
     The card's drive letter. Defaults to NEOS_CARD_DRIVE from .env.local, and
     to G: if that is not set either - see .env.local.example.
@@ -37,14 +40,29 @@ $repo = Split-Path -Parent $PSScriptRoot
 # repo, so the default comes from .env.local rather than from a value in here.
 if (-not $Drive) { $Drive = Get-NeosSetting 'NEOS_CARD_DRIVE' 'G:' }
 
-# app directory on the card  ->  the .app.elf the project builds
-$apps = @{
-    'launcher' = 'apps\launcher\build\launcher.app.elf'
-    'hello'    = 'apps\hello\build\hello.app.elf'
-    'matrix'   = 'apps\matrix\build\matrix.app.elf'
-    'system'   = 'apps\system\build\system.app.elf'
-    'mandel'   = 'apps\mandel\build\mandel.app.elf'
-    'clock'    = 'apps\clock\build\clock.app.elf'
+# What goes on a card, by app directory name. A list and not a scan of apps/,
+# because which of the published apps a card carries is a choice.
+$names = @('launcher', 'hello', 'matrix', 'system', 'mandel', 'clock', 'nupogodi')
+
+# lab/ is different, and is taken whole. It is the private repo of apps still
+# being worked on - gitignored here, and absent from most checkouts. An app is
+# in it precisely because it is the one being tried on the tablet, so there is
+# no choice left to make. Listing them above is not possible in any case: this
+# file is public and they are not.
+$names += @(Get-ChildItem (Join-Path $repo 'lab') -Directory -ErrorAction SilentlyContinue |
+    Where-Object { Test-Path (Join-Path $_.FullName 'manifest.json') } |
+    ForEach-Object { $_.Name } | Sort-Object)
+
+# name -> the project directory that builds it, apps\ first and then lab\.
+$apps = @{}
+foreach ($name in $names) {
+    foreach ($where in @('apps', 'lab')) {
+        $proj = Join-Path $repo (Join-Path $where $name)
+        if (Test-Path (Join-Path $proj 'CMakeLists.txt')) { $apps[$name] = $proj; break }
+    }
+    if (-not $apps.ContainsKey($name)) {
+        Write-Warning "$name : no project under apps\ or lab\ - skipping"
+    }
 }
 
 if (-not (Test-Path $Drive)) {
@@ -52,10 +70,11 @@ if (-not (Test-Path $Drive)) {
            "set NEOS_CARD_DRIVE in .env.local if the reader is not on $Drive.")
 }
 
-foreach ($name in $apps.Keys) {
-    $src = Join-Path $repo $apps[$name]
+foreach ($name in ($apps.Keys | Sort-Object)) {
+    $src = Join-Path $apps[$name] "build\$name.app.elf"
     if (-not (Test-Path $src)) {
-        Write-Warning "$name : not built yet ($($apps[$name])) - skipping"
+        $rel = $src.Substring($repo.Length).TrimStart('\')
+        Write-Warning "$name : not built yet ($rel) - skipping"
         continue
     }
 
@@ -63,7 +82,7 @@ foreach ($name in $apps.Keys) {
     New-Item -ItemType Directory -Path $dest -Force | Out-Null
 
     # The manifest names the entry file; the card's convention is app.elf.
-    $manifestSrc = Join-Path $repo "apps\$name\manifest.json"
+    $manifestSrc = Join-Path $apps[$name] 'manifest.json'
     if (Test-Path $manifestSrc) {
         Copy-Item $manifestSrc (Join-Path $dest 'manifest.json') -Force
         $entry = (Get-Content $manifestSrc -Raw | ConvertFrom-Json).entry

@@ -11,12 +11,18 @@
 #include <stddef.h>
 
 /**
- * Read <dir>/manifest.json. Fills @p name and @p entry, and @p desc if the
- * manifest has one. False if it is missing, unparseable, or incomplete.
+ * Read <dir>/manifest.json. Fills @p name and @p entry, and @p desc and
+ * @p cat if the manifest has them. False if it is missing, unparseable, or
+ * incomplete.
+ *
+ * A missing "category" is not incomplete. The shell decides what to do with an
+ * app that does not name a shelf, and an app that never wanted one is not a
+ * broken app.
  */
 bool neos_app_manifest(const char *dir, char *name, size_t name_sz,
                        char *entry, size_t entry_sz,
-                       char *desc, size_t desc_sz);
+                       char *desc, size_t desc_sz,
+                       char *cat, size_t cat_sz);
 
 /**
  * Load and run one app, leaving a crash breadcrumb around the call.

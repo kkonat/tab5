@@ -501,10 +501,35 @@ uint32_t neos_uptime_s(void)
     return (uint32_t)(esp_timer_get_time() / 1000000);
 }
 
+uint64_t neos_uptime_us(void)
+{
+    return (uint64_t)esp_timer_get_time();
+}
+
 uint32_t neos_heap_free(void)   { return heap_caps_get_free_size(MALLOC_CAP_INTERNAL); }
 uint32_t neos_heap_total(void)  { return heap_caps_get_total_size(MALLOC_CAP_INTERNAL); }
 uint32_t neos_psram_free(void)  { return heap_caps_get_free_size(MALLOC_CAP_SPIRAM); }
 uint32_t neos_psram_total(void) { return heap_caps_get_total_size(MALLOC_CAP_SPIRAM); }
+
+/*
+ * Internal RAM, for the small number of bytes an app touches constantly.
+ *
+ * Aligned to a cache line because the two reasons to want this memory arrive
+ * together: it is fast for the CPU, and it is what the PPA can be pointed at
+ * without ngl having to copy it somewhere acceptable first.
+ *
+ * No fall back to PSRAM when the pool is short. malloc() already does that and
+ * is the right call for almost everything; the only reason to be here is that
+ * PSRAM would be the wrong answer, and quietly giving it anyway would turn a
+ * failure an app could report into a frame rate nobody can explain.
+ */
+void *neos_alloc_fast(size_t n)
+{
+    if (!n) {
+        return NULL;
+    }
+    return heap_caps_aligned_alloc(64, n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
 
 /* ------------------------------------------------------------------ */
 /* Sensors                                                             */
