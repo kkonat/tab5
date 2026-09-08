@@ -151,7 +151,37 @@ if (-not $script) {
 
 switch ([System.IO.Path]::GetExtension($script)) {
     '.py' {
-        & (Find-Python) $script @rest
+        <#
+            The preference is stood down around the call, and this is not
+            tidiness - without it half these scripts cannot be run at all.
+
+            PowerShell 5.1 wraps every stderr line from a native command in an
+            ErrorRecord, and an ErrorRecord arriving under
+            $ErrorActionPreference = 'Stop' terminates the wrapper whatever the
+            command was going to exit with. Anything that streams the tablet's
+            console - `launch --watch`, `capture-boot` - therefore died on the
+            device's first log line, several seconds into a run that had
+            already worked, which reads as the script being broken rather than
+            the shell being fussy.
+
+            The records are flattened to their text on the way out so that a
+            line of console does not arrive wearing five lines of red
+            decoration. build-all.ps1 does the same thing for the same reason,
+            in more detail, over Invoke-Idf.
+        #>
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & (Find-Python) $script @rest 2>&1 | ForEach-Object {
+                if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                    $_.ToString()
+                } else {
+                    $_
+                }
+            }
+        } finally {
+            $ErrorActionPreference = $prev
+        }
         exit $LASTEXITCODE
     }
     '.ps1' {
