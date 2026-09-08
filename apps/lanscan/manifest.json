@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "com.kk.lanscan",
+  "name": "LAnSCan",
+  "description": "what else is on this network",
+  "version": "0.1.0",
+  "type": "elf",
+  "entry": "app.elf",
+  "category": "Tools",
+  "icon": "icon.png",
+  "api": 2
+}

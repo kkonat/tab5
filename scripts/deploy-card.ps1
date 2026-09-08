@@ -42,7 +42,8 @@ if (-not $Drive) { $Drive = Get-NeosSetting 'NEOS_CARD_DRIVE' 'G:' }
 
 # What goes on a card, by app directory name. A list and not a scan of apps/,
 # because which of the published apps a card carries is a choice.
-$names = @('launcher', 'hello', 'matrix', 'system', 'mandel', 'clock', 'nupogodi')
+$names = @('launcher', 'hello', 'matrix', 'system', 'mandel', 'clock', 'nupogodi',
+           'lanscan')
 
 # lab/ is different, and is taken whole. It is the private repo of apps still
 # being worked on - gitignored here, and absent from most checkouts. An app is
@@ -95,6 +96,22 @@ foreach ($name in ($apps.Keys | Sort-Object)) {
     Copy-Item $src (Join-Path $dest $entry) -Force
     $kb = [math]::Round((Get-Item $src).Length / 1KB, 1)
     Write-Host ("{0,-10} -> {1}\{2}  ({3} KB)" -f $name, $dest, $entry, $kb)
+
+    # Data the app reads off the card rather than carries in its image.
+    #
+    # An app with a `card\` directory gets its contents copied alongside the
+    # ELF. So far that is lanscan's oui.bin - a megabyte of IEEE registry that
+    # would be absurd compiled into an app on every card, and which the app
+    # binary-searches in place. It is generated rather than tracked, so it is
+    # normally simply absent, and the app says so instead of failing.
+    $data = Join-Path $apps[$name] 'card'
+    if (Test-Path $data) {
+        foreach ($file in Get-ChildItem $data -File) {
+            Copy-Item $file.FullName (Join-Path $dest $file.Name) -Force
+            $fkb = [math]::Round($file.Length / 1KB, 1)
+            Write-Host ("{0,-10}    {1}  ({2} KB)" -f '', $file.Name, $fkb)
+        }
+    }
 }
 
 if ($Autorun) {

@@ -123,6 +123,12 @@ custom, so a tablet coming from an older build needs a full `flash` and not
 just an app image. `deploy-card` deletes nothing: apps not in its list are left
 where they are.
 
+An app with a `card/` directory gets its contents copied alongside the ELF, for
+the data an app reads off the card rather than carries in its image — so far
+that is `lanscan`'s `oui.bin`, built by [genoui](../tools/genoui/). Those files
+are generated rather than tracked, so the directory is usually absent, and the
+app that wanted it says so instead of failing.
+
 ## A running tablet
 
 | | |

@@ -9,6 +9,7 @@
 
 #include "ngl.h"
 #include "neos_net.h"
+#include "neos_sock.h"
 #include "neos_orient.h"
 #include "neos_status.h"
 #include "neos_sys.h"
@@ -251,6 +252,33 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     ESP_ELFSYM_EXPORT(neos_net_known_count),
     ESP_ELFSYM_EXPORT(neos_net_scanning),
     ESP_ELFSYM_EXPORT(neos_net_scan_results),
+
+    /*
+     * The wire underneath it, which is a different question and gets a
+     * different answer - see the header for why one of these lists is
+     * read-only and the other is not.
+     *
+     * Nothing here decides whether the tablet has a network. It decides what
+     * an app may put on the one NeOS already joined, which is the layer below
+     * the weather's HTTP rather than a second way to reach it: an app still
+     * has no TLS, no HTTP and no JSON, and adding those was never the trade
+     * being made here.
+     */
+    ESP_ELFSYM_EXPORT(neos_sock_open),
+    ESP_ELFSYM_EXPORT(neos_sock_close),
+    ESP_ELFSYM_EXPORT(neos_sock_bind),
+    ESP_ELFSYM_EXPORT(neos_sock_connect),
+    ESP_ELFSYM_EXPORT(neos_sock_status),
+    ESP_ELFSYM_EXPORT(neos_sock_send),
+    ESP_ELFSYM_EXPORT(neos_sock_recv),
+    ESP_ELFSYM_EXPORT(neos_sock_sendto),
+    ESP_ELFSYM_EXPORT(neos_sock_recvfrom),
+    ESP_ELFSYM_EXPORT(neos_sock_wait),
+    ESP_ELFSYM_EXPORT(neos_sock_set),
+    ESP_ELFSYM_EXPORT(neos_sock_join),
+    ESP_ELFSYM_EXPORT(neos_iface),
+    ESP_ELFSYM_EXPORT(neos_neigh_table),
+    ESP_ELFSYM_EXPORT(neos_neigh_ask),
 
     /*
      * The weather, on the same terms as the network it arrives over: NeOS

@@ -102,3 +102,14 @@ CONFIG_FREERTOS_HZ=1000
 # off: this clock is allowed to jump, and a step that takes an hour to apply is
 # worse than one that is over immediately.
 CONFIG_LWIP_SNTP_UPDATE_DELAY=3600000
+
+# Sockets, shared between the firmware and whatever app is resident.
+#
+# The stock 10 is sized for a device that talks to one server. NeOS holds a
+# couple itself - SNTP, and an HTTP fetch while the weather refreshes - and
+# neos_sock.h then promises an app NEOS_SOCK_BUDGET of its own, which nothing
+# under 18 can honour. 24 leaves headroom above that so an app hitting the
+# ceiling is an app that overran its own budget, and not one that happened to
+# open its sixteenth socket during a weather refresh. Each slot is a handful
+# of bytes; the number that matters is in lwIP's PCB pools, not here.
+CONFIG_LWIP_MAX_SOCKETS=24

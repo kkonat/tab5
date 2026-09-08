@@ -62,11 +62,30 @@ bool neos_app_manifest(const char *dir, char *name, size_t name_sz,
     }
 
     cJSON *root = cJSON_ParseWithLength((const char *)raw, sz);
-    free(raw);
     if (!root) {
-        ESP_LOGE(TAG, "  manifest.json is not valid JSON");
+        /*
+         * Say what was actually read, not just that it did not parse.
+         *
+         * "not valid JSON" about a file that is valid JSON on the machine it
+         * was uploaded from is a dead end - it names the symptom and hides
+         * every cause, and the causes are different fixes: a truncated write
+         * is a length that does not match, a half-flushed one is a body that
+         * stops mid-token, and a genuinely bad manifest is neither. The
+         * length and the first line tell those three apart at a glance.
+         */
+        char head[72];
+        size_t n = 0;
+        while (n < sz && n + 1 < sizeof(head) && raw[n] != '\n' && raw[n] != '\r') {
+            head[n] = (raw[n] >= 0x20 && raw[n] < 0x7F) ? (char)raw[n] : '?';
+            n++;
+        }
+        head[n] = 0;
+        ESP_LOGE(TAG, "  manifest.json is not valid JSON (%u bytes, starts \"%s\")",
+                 (unsigned)sz, head);
+        free(raw);
         return false;
     }
+    free(raw);
 
     bool ok = false;
     const cJSON *jn = cJSON_GetObjectItemCaseSensitive(root, "name");

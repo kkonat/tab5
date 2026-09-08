@@ -59,3 +59,10 @@ neos_build.h
 # and its README are; the output is a card file, made locally.
 *.lcd
 *.gw
+
+# The IEEE OUI registry, packed by tools/genoui for lanscan to search off the
+# card. A megabyte of somebody else's data, regenerated with one command, and
+# optional - without it lanscan resolves its built-in prefixes and leaves the
+# rest of the vendor column honestly blank.
+apps/*/card/oui.bin
+lab/*/card/oui.bin

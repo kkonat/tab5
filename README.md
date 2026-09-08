@@ -22,6 +22,7 @@ different shell comes up.
 | <img src="images/20260904-125455-matrix.png" alt="Matrix rain"> | **Matrix** — falling glyph rain, and mostly an exercise in *not* redrawing. The trail fade is quantised into bands so a cell is repainted only when a boundary crosses it, and the frame is flushed in horizontal strips because `ngl_flush()` costs rows, not pixels. |
 | <img src="images/20260904-212113-nupogodi.png" alt="Nu, pogodi!"> | **Nu, pogodi!** — a КБ1013ВК1-2 emulator, and mostly an exercise in not owning the clock. The game is 1856 bytes of mask ROM; a block of 128 instructions is 256 ticks of the piezo pin, which resamples to exactly 375 frames at 48 kHz, and `neos_audio_write()` does not return until the codec has taken them — so handing over a block of sound *is* letting 7.8 ms of game time go by. There is no timer in the app and no way for the emulated clock and the audible one to drift. The segment artwork it draws is built by [genlcd](tools/genlcd/) and is not in the repo. |
 | <img src="images/20260904-125745-system.png" alt="System app"> | **System** — readings and switches. IO, sensors, power, peripherals, network, the card, and the build itself. Every row is a table entry plus a function that fills a string, and a value cell is repainted only on the tick its text actually changed. |
+| <img src="images/20260908-174522-lanscan.png" alt="LAnSCan"> | **LAnSCan** — what else is on this network, and mostly an exercise in having one thread. A port of a terminal scanner that runs a stage per thread and blocks in each; here every stage is a state machine asked to make some progress and give the loop back, because an app runs on NeOS's own stack and a blocking `recv()` is not a slow scanner, it is a close button that has stopped working. The tablet is also *on* the segment it is looking at, so every echo request has to resolve its destination first and a sweep fills the stack's ARP table with everything that is really there — including the hosts that ignore ICMP. ARP is the discovery stage; the port knock only visits addresses that answered something. Names come from mDNS, SSDP, NetBIOS and SNMP; vendors from the IEEE registry, binary-searched off the card by [genoui](tools/genoui/) rather than held in memory. |
 
 System panels belong to the firmware, so they are the same wherever you are:
 
@@ -75,7 +76,7 @@ the table can be reordered and grown freely and older apps keep running. An app
 that draws with `ngl` carries none of it — `hello` is a couple of kilobytes on
 the card.
 
-**The ABI is versioned honestly.** `NEOS_ABI_MAJOR.MINOR`, currently 1.15; see
+**The ABI is versioned honestly.** `NEOS_ABI_MAJOR.MINOR`, currently 1.19; see
 [neos_abi.h](neos/components/neos_api/include/neos_abi.h). Minor is additive.
 The firmware defines one small object per released minor and an app emits a
 reference to the single row it was built against, so the *linker and the
@@ -106,6 +107,13 @@ themselves. The same reasoning puts [weather](neos/main/neos_weather.c) in the
 firmware: apps have no TLS, no HTTP and no JSON in the syscall table, and two
 apps showing the weather should not be able to disagree about it.
 
+What that line is *not* around is the wire. [neos_sock.h](neos/components/neos_api/include/neos_sock.h)
+gives an app an IPv4 socket, always non-blocking, plus its own address and mask
+and the stack's neighbour cache — the layer below all of the above. A scan is
+an app's own transient work that nothing else in the system has an opinion
+about, and it still cannot decide which network the tablet is on or whether
+there is one. `lanscan` is the app that wanted it.
+
 ## Repo layout
 
 | Path | What |
@@ -113,10 +121,10 @@ apps showing the weather should not be able to disagree about it.
 | [neos/](neos/) | The firmware. `main/` holds bring-up, the boot chain, the system bar, the panels and the console link. |
 | [neos/components/ngl/](neos/components/ngl/) | The graphics library, exported to apps. |
 | [neos/components/neos_api/](neos/components/neos_api/) | The ABI headers — the whole app-visible surface. |
-| [apps/](apps/) | Apps, one IDF project each: `launcher`, `hello`, `clock`, `mandel`, `matrix`, `system`, `nupogodi`. |
+| [apps/](apps/) | Apps, one IDF project each: `launcher`, `hello`, `clock`, `mandel`, `matrix`, `system`, `nupogodi`, `lanscan`. |
 | `lab/` | Not here. An app that is not ready to publish is kept in a separate private repo, cloned to `lab/` and gitignored; the build, upload and card scripts look there as well as in `apps/`. An app is at the same depth either way, so publishing one is a move. |
 | [scripts/](scripts/) | Toolchain setup, build, flash, upload, screenshot, boot capture, card deploy, ABI check, stock-flash restore. Every one of them, with its invocations, in [scripts/SCRIPTS.md](scripts/SCRIPTS.md). |
-| [tools/](tools/) | Build-time generators for fonts, icons and glyphs, and the emulator's artwork. Their output is checked in, except genlcd's, which is not ours. |
+| [tools/](tools/) | Build-time generators for fonts, icons and glyphs, the emulator's artwork and the MAC vendor registry. Their output is checked in, except genlcd's and genoui's, neither of which is ours. |
 | [docs/specs_fingerprint.md](docs/specs_fingerprint.md) | The hardware, read off this unit rather than off a datasheet. |
 | [original_flash/](original_flash/) | The stock M5Stack image, so the tablet can always be put back. |
 

@@ -248,9 +248,27 @@ static void receive(const char *rel, long size, uint32_t want_crc)
     while (left > 0) {
         const int want = (int)(left < BLOCK ? left : BLOCK);
 
-        /* Ask for exactly what will fit, then take it. */
-        printf("@NEOSPUT-RDY %d\n", want);
-        fflush(stdout);
+        /*
+         * Ask for exactly what will fit, then take it.
+         *
+         * Written to the USB Serial/JTAG directly rather than with printf,
+         * and that is not a style preference. This is the one line in the
+         * protocol that is emitted while the destination file is open, and
+         * stdout here is a file descriptor: the card file can be handed the
+         * descriptor printf writes to, at which point every one of these
+         * prompts is appended to the file instead of being sent to the host.
+         * It shows up as a file exactly (blocks x 18) bytes longer than the
+         * header promised - 198 bytes on a 42 KB app - and then as an app
+         * whose ELF header is garbage or whose manifest will not parse.
+         *
+         * The reads a few lines down already come from this peripheral. The
+         * writes that pace them belong on it too.
+         */
+        char rdy[32];
+        const int rdy_len = snprintf(rdy, sizeof(rdy), "@NEOSPUT-RDY %d\n", want);
+        if (rdy_len > 0) {
+            usb_serial_jtag_write_bytes(rdy, (size_t)rdy_len, portMAX_DELAY);
+        }
 
         int got = 0;
         while (got < want) {
@@ -280,7 +298,33 @@ static void receive(const char *rel, long size, uint32_t want_crc)
             neos_status_progress(pct);
         }
     }
-    fclose(f);
+    /*
+     * Flushed to the card before the handle goes, and then the close is
+     * checked - neither of which this path was doing.
+     *
+     * The fsync is the one that matters, and it took a while to find. Without
+     * it the data reaches the card but the directory entry can still be the
+     * old one for a moment, so a read that arrives in that moment gets the
+     * right file at the wrong length - which for a JSON manifest is a
+     * truncated object and for an ELF is a header full of nothing. And
+     * something does arrive in that moment: writing a file triggers a card
+     * rescan, and the rescan reads the manifest that was just written. It
+     * showed up as "manifest.json is not valid JSON" for a file that was
+     * perfectly good, seconds after a successful upload, and it stuck,
+     * because the registry keeps what the scan found.
+     *
+     * The close is checked for the ordinary reason: it is where a failure to
+     * write the tail is reported, and a transfer that succeeded would
+     * otherwise report success over a truncated file.
+     */
+    if (ok && (fflush(f) != 0 || fsync(fileno(f)) != 0)) {
+        ESP_LOGE(TAG, "sync %s: %s", full, strerror(errno));
+        ok = false;
+    }
+    if (fclose(f) != 0 && ok) {
+        ESP_LOGE(TAG, "close %s: %s", full, strerror(errno));
+        ok = false;
+    }
     neos_status_progress(-1);
 
     if (!ok) {
@@ -293,6 +337,47 @@ static void receive(const char *rel, long size, uint32_t want_crc)
         printf("@NEOSPUT-ERR crc mismatch\n");
         ESP_LOGE(TAG, "crc %08lx, expected %08lx",
                  (unsigned long)crc, (unsigned long)want_crc);
+        return;
+    }
+
+    /*
+     * Read it back and check it.
+     *
+     * The CRC above only says that the bytes this function *received* match
+     * what the sender sent. It says nothing about what reached the card, and
+     * those turned out not to be the same thing: files have arrived with this
+     * protocol's own "@NEOSPUT-RDY" prompt at offset zero and the real content
+     * after it, seventeen bytes longer than the header promised - which means
+     * something else on this console is echoing, or reading, or both, and the
+     * transfer picked its own prompt up as file data.
+     *
+     * Whatever the cause, the failure was silent: the sender was told the file
+     * was written, and the damage first showed up much later as an app whose
+     * manifest would not parse. A file that does not read back as what was
+     * sent is deleted and reported, so a bad upload is a retry rather than a
+     * mystery. The read is a few milliseconds against a transfer that took
+     * hundreds.
+     */
+    long check_len = 0;
+    uint32_t check_crc = 0;
+    FILE *v = fopen(full, "rb");
+    if (v) {
+        for (;;) {
+            const size_t n = fread(s_block, 1, BLOCK, v);
+            if (n == 0) {
+                break;
+            }
+            check_crc = esp_rom_crc32_le(check_crc, s_block, n);
+            check_len += (long)n;
+        }
+        fclose(v);
+    }
+    if (check_len != size || check_crc != want_crc) {
+        unlink(full);
+        ESP_LOGE(TAG, "%s read back as %ld bytes crc %08lx, wanted %ld/%08lx",
+                 full, check_len, (unsigned long)check_crc, size,
+                 (unsigned long)want_crc);
+        printf("@NEOSPUT-ERR readback mismatch\n");
         return;
     }
 
