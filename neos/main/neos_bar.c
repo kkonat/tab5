@@ -29,6 +29,7 @@
 #include "neos_boot.h"
 #include "neos_net.h"
 #include "neos_status.h"
+#include "neos_sys.h"
 #include "neos_time.h"
 
 static const char *TAG = "bar";
@@ -42,10 +43,22 @@ static const char *TAG = "bar";
 #define VER_PAD 10
 #define VER_GAP 10
 
-/* The two widgets on the right, between the status line and the close button. */
-#define WIFI_W  40
-#define CLOCK_W 92
-#define WID_GAP 6
+/* The widgets on the right, between the status line and the close button. */
+#define WIFI_W    40
+#define CLOCK_W   92
+#define BATTERY_W 40
+#define WID_GAP   6
+
+/*
+ * 2S LiPo pack thresholds, read off neos_power_read()'s bus_mv - the INA226
+ * sits across the main rail, which on this board is the battery.
+ *
+ * WARN is 3.30 V/cell: still safe to keep going, but worth a colour change.
+ * DANGER is 3.00 V/cell: the point past which further discharge risks
+ * permanently damaging the cells, which is what the flashing is for.
+ */
+#define BATTERY_2S_WARN_MV   6600
+#define BATTERY_2S_DANGER_MV 6000
 
 /*
  * Which build this is, as it goes in the badge.
@@ -119,11 +132,19 @@ static ngl_rect_t wifi_rect(void)
     return ngl_rect((int16_t)(c.x - WID_GAP - WIFI_W), 0, WIFI_W, c.h);
 }
 
-static ngl_rect_t widgets_rect(void)
+static ngl_rect_t battery_rect(void)
 {
     const ngl_rect_t w = wifi_rect();
+    return ngl_rect((int16_t)(w.x - WID_GAP - BATTERY_W), 0, BATTERY_W, w.h);
+}
+
+static ngl_rect_t widgets_rect(void)
+{
+    const ngl_rect_t b = battery_rect();
+    const ngl_rect_t w = wifi_rect();
     const ngl_rect_t c = clock_rect();
-    return ngl_rect_union(&w, &c);
+    const ngl_rect_t bw = ngl_rect_union(&b, &w);
+    return ngl_rect_union(&bw, &c);
 }
 
 static int16_t left_reserved(void)
@@ -136,7 +157,7 @@ static ngl_rect_t status_rect(void)
 {
     const ngl_rect_t bar = ngl_bar_rect();
     const int16_t l = (int16_t)(left_reserved() + 16);
-    int16_t w = (int16_t)(wifi_rect().x - WID_GAP - l);
+    int16_t w = (int16_t)(battery_rect().x - WID_GAP - l);
     if (w < 0) {
         w = 0;
     }
@@ -207,6 +228,45 @@ static void paint_wifi(ngl_surface_t *s)
              (int16_t)(r.y + (r.h - ic->h) / 2), ic, wifi_tint(neos_net_state()));
 }
 
+/*
+ * The battery icon is one glyph in three colours, the same trick as the Wi-Fi
+ * one: dim while there is plenty left, TH_WARN once the pack passes 3.3 V/cell,
+ * and flashing TH_BAD once it passes the 3.0 V/cell line a 2S LiPo should not
+ * be taken past. s_batt_blink_on is toggled by the widget tick and read here
+ * rather than recomputed, so the on/off halves of the flash actually alternate
+ * instead of both landing on whichever phase a given repaint happens to hit.
+ *
+ * Nothing is drawn at all if the power monitor never answered - a dash or a
+ * question mark would claim to know something about a battery that, on this
+ * board, might not be wired up.
+ */
+static bool s_batt_blink_on = true;
+
+static void paint_battery(ngl_surface_t *s)
+{
+    const ngl_rect_t r = battery_rect();
+    ngl_fill_rect(s, r, TH_BAR_BG);
+
+    neos_power_t p;
+    if (!neos_power_read(&p)) {
+        return;
+    }
+
+    const bool danger = p.bus_mv > 0 && p.bus_mv < BATTERY_2S_DANGER_MV;
+    if (danger && !s_batt_blink_on) {
+        return;   /* the "off" half of the flash */
+    }
+
+    const ngl_icon_t *ic = ngl_icon_find("battery", 24);
+    if (!ic) {
+        return;
+    }
+    const ngl_color_t c = danger ? TH_BAD
+                         : (p.bus_mv < BATTERY_2S_WARN_MV ? TH_WARN : TH_TEXT_DIM);
+    ngl_icon(s, (int16_t)(r.x + (r.w - ic->w) / 2),
+             (int16_t)(r.y + (r.h - ic->h) / 2), ic, c);
+}
+
 /** "14:32", or "--:--" on a tablet that has never been told the time. */
 static void clock_text(char *buf, size_t n)
 {
@@ -245,6 +305,7 @@ static void paint_clock(ngl_surface_t *s)
  */
 static char             s_shown_clock[8];
 static neos_net_state_t s_shown_net = (neos_net_state_t)-1;
+static int32_t           s_shown_batt_mv = INT32_MIN;   /* unread yet */
 
 void neos_bar_widgets_refresh(void)
 {
@@ -266,16 +327,39 @@ void neos_bar_widgets_refresh(void)
     clock_text(now, sizeof(now));
     const neos_net_state_t st = neos_net_state();
 
-    if (st == s_shown_net && strcmp(now, s_shown_clock) == 0) {
+    neos_power_t p = {0};
+    const bool    batt_ok = neos_power_read(&p);
+    const int32_t batt_mv = batt_ok ? p.bus_mv : INT32_MIN;
+    const bool    danger  = batt_ok && p.bus_mv > 0 && p.bus_mv < BATTERY_2S_DANGER_MV;
+
+    /*
+     * The blink has to force a repaint every tick it is active, since neither
+     * the clock nor the net state changes while the icon alternates on and
+     * off. Once danger clears, s_batt_blink_on is left true rather than
+     * whatever phase it stopped on, so the icon comes back solid instead of
+     * possibly stuck invisible.
+     */
+    bool batt_changed = (batt_mv != s_shown_batt_mv);
+    if (danger) {
+        s_batt_blink_on = !s_batt_blink_on;
+        batt_changed    = true;
+    } else if (!s_batt_blink_on) {
+        s_batt_blink_on = true;
+        batt_changed    = true;
+    }
+
+    if (st == s_shown_net && strcmp(now, s_shown_clock) == 0 && !batt_changed) {
         return;
     }
-    s_shown_net = st;
+    s_shown_net    = st;
+    s_shown_batt_mv = batt_mv;
     strlcpy(s_shown_clock, now, sizeof(s_shown_clock));
 
     ngl_surface_t *s = ngl_bar_begin(widgets_rect());
     if (!s) {
         return;
     }
+    paint_battery(s);
     paint_wifi(s);
     paint_clock(s);
     /* ngl_bar_end() flushes the widget strip; see neos_status.c for why this
@@ -319,6 +403,7 @@ static void bar_painter(ngl_surface_t *s, ngl_rect_t bar)
         }
     }
 
+    paint_battery(s);
     paint_wifi(s);
     paint_clock(s);
 
