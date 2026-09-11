@@ -30,6 +30,7 @@ typedef enum {
     NEOS_PANEL_NONE = 0,
     NEOS_PANEL_WIFI,
     NEOS_PANEL_CLOCK,
+    NEOS_PANEL_BATTERY,
 } neos_panel_t;
 
 /** Start the task that runs bar-launched panels. Call once, after the bar. */

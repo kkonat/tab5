@@ -36,9 +36,24 @@ typedef enum {
     NEOS_BAR_CLOSE,
     NEOS_BAR_WIFI,
     NEOS_BAR_CLOCK,
+    NEOS_BAR_BATTERY,
 } neos_bar_hit_t;
 
 neos_bar_hit_t neos_bar_hit(int16_t x, int16_t y);
+
+/*
+ * 2S LiPo pack thresholds, read off neos_power_read()'s bus_mv - the INA226
+ * sits across the main rail, which on this board is the battery.
+ *
+ * WARN is 3.30 V/cell: still safe to keep going, but worth a colour change.
+ * DANGER is 3.00 V/cell: the point past which further discharge risks
+ * permanently damaging the cells, which is what the flashing is for.
+ *
+ * Shared with neos_panel_battery.c so the detail panel and the bar icon never
+ * disagree about where the lines are.
+ */
+#define NEOS_BATTERY_2S_WARN_MV   6600
+#define NEOS_BATTERY_2S_DANGER_MV 6000
 
 /**
  * Repaint the Wi-Fi icon and the clock if either has moved.

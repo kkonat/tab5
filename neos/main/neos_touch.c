@@ -121,6 +121,9 @@ static bool bar_took_it(int16_t x, int16_t y)
     case NEOS_BAR_CLOCK:
         neos_ui_open(NEOS_PANEL_CLOCK);
         return true;
+    case NEOS_BAR_BATTERY:
+        neos_ui_open(NEOS_PANEL_BATTERY);
+        return true;
     default:
         return false;
     }

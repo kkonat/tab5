@@ -14,3 +14,6 @@ void neos_panel_wifi(void);
 
 /** The date, the time, the month, and which zone all of that is in. */
 void neos_panel_clock(void);
+
+/** The main-rail reading behind the bar's battery icon, in full. */
+void neos_panel_battery(void);

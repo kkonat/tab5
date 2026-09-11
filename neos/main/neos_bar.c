@@ -50,17 +50,6 @@ static const char *TAG = "bar";
 #define WID_GAP   6
 
 /*
- * 2S LiPo pack thresholds, read off neos_power_read()'s bus_mv - the INA226
- * sits across the main rail, which on this board is the battery.
- *
- * WARN is 3.30 V/cell: still safe to keep going, but worth a colour change.
- * DANGER is 3.00 V/cell: the point past which further discharge risks
- * permanently damaging the cells, which is what the flashing is for.
- */
-#define BATTERY_2S_WARN_MV   6600
-#define BATTERY_2S_DANGER_MV 6000
-
-/*
  * Which build this is, as it goes in the badge.
  *
  * A counter bumped once per build (neos/cmake/bump_build.cmake), not a git
@@ -190,6 +179,10 @@ neos_bar_hit_t neos_bar_hit(int16_t x, int16_t y)
     if (ngl_rect_contains(&r, x, y)) {
         return NEOS_BAR_CLOCK;
     }
+    r = battery_rect();
+    if (ngl_rect_contains(&r, x, y)) {
+        return NEOS_BAR_BATTERY;
+    }
     return NEOS_BAR_NONE;
 }
 
@@ -252,7 +245,7 @@ static void paint_battery(ngl_surface_t *s)
         return;
     }
 
-    const bool danger = p.bus_mv > 0 && p.bus_mv < BATTERY_2S_DANGER_MV;
+    const bool danger = p.bus_mv > 0 && p.bus_mv < NEOS_BATTERY_2S_DANGER_MV;
     if (danger && !s_batt_blink_on) {
         return;   /* the "off" half of the flash */
     }
@@ -262,7 +255,7 @@ static void paint_battery(ngl_surface_t *s)
         return;
     }
     const ngl_color_t c = danger ? TH_BAD
-                         : (p.bus_mv < BATTERY_2S_WARN_MV ? TH_WARN : TH_TEXT_DIM);
+                         : (p.bus_mv < NEOS_BATTERY_2S_WARN_MV ? TH_WARN : TH_TEXT_DIM);
     ngl_icon(s, (int16_t)(r.x + (r.w - ic->w) / 2),
              (int16_t)(r.y + (r.h - ic->h) / 2), ic, c);
 }
@@ -330,7 +323,7 @@ void neos_bar_widgets_refresh(void)
     neos_power_t p = {0};
     const bool    batt_ok = neos_power_read(&p);
     const int32_t batt_mv = batt_ok ? p.bus_mv : INT32_MIN;
-    const bool    danger  = batt_ok && p.bus_mv > 0 && p.bus_mv < BATTERY_2S_DANGER_MV;
+    const bool    danger  = batt_ok && p.bus_mv > 0 && p.bus_mv < NEOS_BATTERY_2S_DANGER_MV;
 
     /*
      * The blink has to force a repaint every tick it is active, since neither
