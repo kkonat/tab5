@@ -54,7 +54,15 @@
 #define TICK_MS     150         /* how often a reading is re-read */
 #define POLL_MS     20          /* how often the finger is looked at */
 
-#define MAX_ROWS    10
+/*
+ * Room for the widest tab, which is Power since it grew a slider and two
+ * buttons. The per-cell caches are indexed by row, so this is what sizes them -
+ * and the assertions under the tab table are what notice when a tab outgrows it.
+ */
+#define MAX_ROWS    14
+
+/* The shortest a row may be squeezed to before it stops being tappable. */
+#define ROW_H_MIN   40
 
 /* ------------------------------------------------------------------ */
 /* Rows                                                                */
@@ -63,8 +71,19 @@
 typedef enum {
     R_VALUE,    /**< label, and a string that is recomputed every tick */
     R_TOGGLE,   /**< label, and a switch */
-    R_SLIDER,   /**< label, a 0-100 track, and the number */
+    R_SLIDER,   /**< label, a track, and the value */
     R_ACTION,   /**< label, a value, and a tap that does something */
+    /*
+     * A labelled button in the value cell.
+     *
+     * R_ACTION already makes a row tappable, and it is the right shape when the
+     * row has a value that happens also to be the invitation - "tap to scan"
+     * sitting where the scan's result will be. It is the wrong shape when there
+     * is no value at all: a row whose only right-hand side is the word "off"
+     * reads as a reading of something, and the one thing it must read as is a
+     * thing you can press.
+     */
+    R_BUTTON,
 } rkind_t;
 
 typedef struct {
@@ -76,13 +95,37 @@ typedef struct {
     void (*set)(bool on);
     int  (*iget)(void);                 /* R_SLIDER */
     void (*iset)(int v);
-    void (*act)(void);                  /* R_ACTION */
+    void (*act)(void);                  /* R_ACTION, R_BUTTON */
+    const char *btn;                    /* R_BUTTON: what is written on it */
+    /*
+     * R_SLIDER, when it is not a percentage.
+     *
+     * imax of zero means 0-100 and "%d%%", which is what a backlight is. A sleep
+     * timeout is neither: its range is minutes and its bottom end is a word, not
+     * a number, so the row says what its own value means instead of leaving the
+     * slider to guess.
+     */
+    int  imax;
+    void (*itext)(char *buf, int n, int v);
 } row_t;
 
 typedef struct {
     const char  *name;
     const row_t *rows;
     int          nrows;
+
+    /*
+     * A tab that draws itself instead of being a table of rows.
+     *
+     * One tab needs it: the task list is however many tasks are running, which
+     * is not a fixed set of readings and cannot be a fixed set of rows. Rather
+     * than bend the row machinery into something that can also be a list, a tab
+     * may bring its own three functions - the frame, the tick, and the tap - and
+     * everything below treats it the same way otherwise.
+     */
+    void (*paint)(ngl_surface_t *sc);
+    void (*tick)(ngl_surface_t *sc);
+    bool (*tap)(int16_t x, int16_t y);
 } tab_t;
 
 /* ------------------------------------------------------------------ */
@@ -268,6 +311,9 @@ static void typed_tap(void)
     }
 }
 
+/* Down with the task page, which is where the thing it starts is stopped. */
+static void tone_tap(void);
+
 static const row_t ROWS_IO[] = {
     { .kind = R_SLIDER, .label = "Backlight",   .iget = bl_get, .iset = bl_set },
     { .kind = R_VALUE,  .label = "Resolution",  .text = v_resolution },
@@ -278,6 +324,12 @@ static const row_t ROWS_IO[] = {
     { .kind = R_TOGGLE, .label = "Tap sounds",  .get = taps_get, .set = taps_set },
     { .kind = R_ACTION, .label = "Text input",  .text = v_typed, .act = typed_tap },
     { .kind = R_ACTION, .label = "Saved settings", .text = v_settings, .act = settings_tap },
+    /*
+     * Here rather than on the task page, because starting a thing and stopping
+     * it are not the same kind of act: this is a switch on a page of switches,
+     * and stopping it is one row in a list of everything that is running.
+     */
+    { .kind = R_BUTTON, .label = "Background tone", .btn = "play", .act = tone_tap },
 };
 
 /* ------------------------------------------------------------------ */
@@ -472,6 +524,64 @@ RAIL(spk,    NEOS_FEAT_SPEAKER)
 RAIL(wifi,   NEOS_FEAT_WIFI)
 RAIL(ant,    NEOS_FEAT_ANTENNA)
 
+/*
+ * The rest of the pack, which is a page of its own and already exists.
+ *
+ * Five rows of power readings and then nothing about the battery itself - no
+ * percentage, no history, no estimate of how long it has left - while all of
+ * that sits behind an icon in the corner of the bar. The icon is one tap from
+ * everywhere and is still the wrong place to send somebody who is already
+ * looking at a page called Power, so the page says where the rest of it is.
+ */
+static void battery_tap(void)
+{
+    neos_syspanel_open(NEOS_SYSPANEL_BATTERY);
+}
+
+/*
+ * Sleeping, and the two halves of it.
+ *
+ * The slider is how long the tablet waits; the button is not waiting. They are
+ * on the power page and not among the display settings on purpose - what turning
+ * the screen off is for is the battery, and the reason to look for it is the
+ * reading three rows up.
+ */
+static int  sleep_get(void)      { return neos_idle_timeout_min(); }
+static void sleep_set(int v)     { neos_idle_timeout_set(v); }
+
+static void sleep_text(char *b, int n, int v)
+{
+    if (v <= 0) {
+        snprintf(b, n, "never");
+    } else {
+        snprintf(b, n, "%d min", v);
+    }
+}
+
+/*
+ * Off now, and everything else keeps running - which is the whole feature and
+ * the reason this is not called "sleep". A player started from the IO tab plays
+ * through it, the clock stays right, and a touch or picking the tablet up brings
+ * the screen back.
+ */
+static void screen_tap(void)
+{
+    /*
+     * The message, a moment to read it, and then dark.
+     *
+     * The pause is the whole of it. The status line is painted by NeOS on its
+     * own clock, so setting a message and switching the panel off in the next
+     * instruction shows nobody anything - and what it would have said is the one
+     * thing a user meeting this button for the first time needs to know, which is
+     * how to undo it. Blocking here is free: this is a tap on a settings page
+     * and there is nothing else the app was going to do with the next half
+     * second.
+     */
+    neos_status_for("screen off - touch it or pick it up to wake", 2500);
+    neos_sleep_ms(700);
+    neos_screen_off();
+}
+
 static const row_t ROWS_POWER[] = {
     { .kind = R_VALUE,  .label = "Bus voltage",  .text = v_bus },
     { .kind = R_VALUE,  .label = "Current",      .text = v_current },
@@ -482,6 +592,10 @@ static const row_t ROWS_POWER[] = {
     { .kind = R_TOGGLE, .label = "Fast charge",  .get = qc_get,     .set = qc_set },
     { .kind = R_TOGGLE, .label = "USB-A 5V out", .get = usb5v_get,  .set = usb5v_set },
     { .kind = R_TOGGLE, .label = "Ext 5V out",   .get = ext5v_get,  .set = ext5v_set },
+    { .kind = R_BUTTON, .label = "Battery detail", .btn = "more...", .act = battery_tap },
+    { .kind = R_SLIDER, .label = "Sleep after",  .iget = sleep_get, .iset = sleep_set,
+      .imax = NEOS_IDLE_MAX_MIN, .itext = sleep_text },
+    { .kind = R_BUTTON, .label = "Screen",       .btn = "off", .act = screen_tap },
 };
 
 /* ------------------------------------------------------------------ */
@@ -795,16 +909,25 @@ static const row_t ROWS_SD[] = {
 
 /* ------------------------------------------------------------------ */
 
-#define NTABS 7
+/* The task page brings its own three functions; they are at the bottom, with
+   the painting helpers they are built out of. */
+static void tasks_paint(ngl_surface_t *sc);
+static void tasks_tick(ngl_surface_t *sc);
+static bool tasks_tap(int16_t x, int16_t y);
 
+#define NTABS 8
+
+/* Named fields, so that a tab which does not bring its own painting says so by
+   leaving those out rather than by three NULLs nobody can read. */
 static const tab_t TABS[NTABS] = {
-    { "IO",      ROWS_IO,      (int)(sizeof(ROWS_IO)      / sizeof(row_t)) },
-    { "SENSORS", ROWS_SENSORS, (int)(sizeof(ROWS_SENSORS) / sizeof(row_t)) },
-    { "POWER",   ROWS_POWER,   (int)(sizeof(ROWS_POWER)   / sizeof(row_t)) },
-    { "PERIPH",  ROWS_PERIPH,  (int)(sizeof(ROWS_PERIPH)  / sizeof(row_t)) },
-    { "NET",     ROWS_NET,     (int)(sizeof(ROWS_NET)     / sizeof(row_t)) },
-    { "SD",      ROWS_SD,      (int)(sizeof(ROWS_SD)      / sizeof(row_t)) },
-    { "SYSTEM",  ROWS_SYSTEM,  (int)(sizeof(ROWS_SYSTEM)  / sizeof(row_t)) },
+    { .name = "IO",      .rows = ROWS_IO,      .nrows = (int)(sizeof(ROWS_IO)      / sizeof(row_t)) },
+    { .name = "SENSORS", .rows = ROWS_SENSORS, .nrows = (int)(sizeof(ROWS_SENSORS) / sizeof(row_t)) },
+    { .name = "POWER",   .rows = ROWS_POWER,   .nrows = (int)(sizeof(ROWS_POWER)   / sizeof(row_t)) },
+    { .name = "PERIPH",  .rows = ROWS_PERIPH,  .nrows = (int)(sizeof(ROWS_PERIPH)  / sizeof(row_t)) },
+    { .name = "NET",     .rows = ROWS_NET,     .nrows = (int)(sizeof(ROWS_NET)     / sizeof(row_t)) },
+    { .name = "SD",      .rows = ROWS_SD,      .nrows = (int)(sizeof(ROWS_SD)      / sizeof(row_t)) },
+    { .name = "SYSTEM",  .rows = ROWS_SYSTEM,  .nrows = (int)(sizeof(ROWS_SYSTEM)  / sizeof(row_t)) },
+    { .name = "TASKS",   .paint = tasks_paint, .tick = tasks_tick, .tap = tasks_tap },
 };
 
 /* The per-cell caches are indexed by row, so the widest tab sets their size. */
@@ -822,6 +945,18 @@ _Static_assert(sizeof(ROWS_SYSTEM)  / sizeof(row_t) <= MAX_ROWS, "MAX_ROWS too s
 
 static ngl_rect_t s_area;       /* what the OS is currently giving us */
 static int        s_tab;
+
+/*
+ * How tall a row is on this tab, in this orientation.
+ *
+ * It used to be the constant ROW_H, which was fine while the longest tab was
+ * nine rows: nine times fifty-six fits under the tab strip in landscape with
+ * room to spare. Twelve does not, and the row that does not fit is not clipped -
+ * it is drawn off the bottom of the panel, where a slider you cannot see is
+ * still a slider you can drag. So the height is what fits, down to a floor
+ * below which a row stops being something a finger can hit.
+ */
+static int16_t s_row_h = ROW_H;
 
 /* Last thing painted into each cell, so a tick can tell whether to repaint. */
 static char s_shown[MAX_ROWS][48];
@@ -863,6 +998,23 @@ static int16_t tabs_h(void)
     return (int16_t)(s_tab_rows * TAB_ROW_H);
 }
 
+/** Re-measure the rows for whichever tab is open. */
+static void rows_layout(void)
+{
+    const int n = TABS[s_tab].nrows;
+    s_row_h = ROW_H;
+    if (n <= 0) {
+        return;
+    }
+    const int16_t avail = (int16_t)(s_area.h - tabs_h() - 16);
+    if (avail > 0 && n * ROW_H > avail) {
+        s_row_h = (int16_t)(avail / n);
+        if (s_row_h < ROW_H_MIN) {
+            s_row_h = ROW_H_MIN;
+        }
+    }
+}
+
 static ngl_rect_t tab_rect(int i)
 {
     const int16_t w = (int16_t)(s_area.w / s_tab_cols);
@@ -875,8 +1027,8 @@ static ngl_rect_t tab_rect(int i)
 static ngl_rect_t row_rect(int i)
 {
     return ngl_rect((int16_t)(s_area.x + MARGIN),
-                    (int16_t)(s_area.y + tabs_h() + 8 + i * ROW_H),
-                    (int16_t)(s_area.w - 2 * MARGIN), ROW_H);
+                    (int16_t)(s_area.y + tabs_h() + 8 + i * s_row_h),
+                    (int16_t)(s_area.w - 2 * MARGIN), s_row_h);
 }
 
 /** Where a value string is drawn, right-aligned. Also the repaint unit. */
@@ -884,19 +1036,19 @@ static ngl_rect_t val_rect(const ngl_rect_t *row)
 {
     const int16_t w = (int16_t)(row->w - SLIDER_X);
     return ngl_rect((int16_t)(row->x + SLIDER_X), (int16_t)(row->y + 8),
-                    w, (int16_t)(ROW_H - 16));
+                    w, (int16_t)(s_row_h - 16));
 }
 
 static ngl_rect_t switch_rect(const ngl_rect_t *row)
 {
     return ngl_rect((int16_t)(row->x + row->w - SW_W),
-                    (int16_t)(row->y + (ROW_H - SW_H) / 2), SW_W, SW_H);
+                    (int16_t)(row->y + (s_row_h - SW_H) / 2), SW_W, SW_H);
 }
 
 static ngl_rect_t track_rect(const ngl_rect_t *row)
 {
     return ngl_rect((int16_t)(row->x + SLIDER_X),
-                    (int16_t)(row->y + (ROW_H - SLIDER_H) / 2),
+                    (int16_t)(row->y + (s_row_h - SLIDER_H) / 2),
                     (int16_t)(row->w - SLIDER_X - SLIDER_TAIL), SLIDER_H);
 }
 
@@ -925,6 +1077,49 @@ static void text_right(ngl_surface_t *sc, const ngl_rect_t *box, const char *s,
     ngl_clip_set(sc, box);
     ngl_text(sc, x, y, s, &ngl_font_small, c);
     ngl_clip_set(sc, NULL);
+}
+
+/** As text_right(), centred. For what is written on a button. */
+static void text_centred(ngl_surface_t *sc, const ngl_rect_t *box, const char *s,
+                         ngl_color_t c)
+{
+    const int16_t w = ngl_text_width(&ngl_font_small, s);
+    int16_t x = (int16_t)(box->x + (box->w - w) / 2);
+    if (x < box->x) {
+        x = box->x;
+    }
+    const int16_t y = (int16_t)(box->y + (box->h - ngl_font_small.height) / 2);
+
+    ngl_clip_set(sc, box);
+    ngl_text(sc, x, y, s, &ngl_font_small, c);
+    ngl_clip_set(sc, NULL);
+}
+
+/*
+ * A button: outlined, filled behind the label, and the same shape everywhere.
+ *
+ * Outline rather than fill, like the switches and for the same reason given at
+ * paint_switch() - in a one-hue palette a filled rectangle is a brightness
+ * difference, and a brightness difference reads as a rendering artefact rather
+ * than as a control.
+ */
+static void button_box(ngl_surface_t *sc, ngl_rect_t r, const char *label)
+{
+    ngl_fill_round_rect(sc, r, 8, TH_KEY_FILL);
+    ngl_draw_round_rect(sc, r, 8, TH_KEY_EDGE, 2);
+    text_centred(sc, &r, label, TH_KEY_TEXT);
+}
+
+/** Where a row's button goes: the right-hand end of the value cell. */
+static ngl_rect_t button_rect(const ngl_rect_t *row, const char *label)
+{
+    int16_t w = (int16_t)(ngl_text_width(&ngl_font_small, label) + 36);
+    if (w < 88) {
+        w = 88;
+    }
+    const int16_t h = (int16_t)(s_row_h - 16 > 44 ? 44 : s_row_h - 16);
+    return ngl_rect((int16_t)(row->x + row->w - w),
+                    (int16_t)(row->y + (s_row_h - h) / 2), w, h);
 }
 
 static void paint_tabs(ngl_surface_t *sc)
@@ -978,33 +1173,44 @@ static void paint_switch(ngl_surface_t *sc, ngl_rect_t sw, bool on)
                         on ? TH_GLOW : TH_TEXT_FAINT);
 }
 
-static void paint_slider(ngl_surface_t *sc, const ngl_rect_t *row, int v)
+/** The top of a slider's range: 0-100 unless the row says otherwise. */
+static int slider_max(const row_t *r)
 {
+    return r->imax > 0 ? r->imax : 100;
+}
+
+static void paint_slider(ngl_surface_t *sc, const ngl_rect_t *row, const row_t *r,
+                         int v)
+{
+    const int max = slider_max(r);
     if (v < 0)   { v = 0; }
-    if (v > 100) { v = 100; }
+    if (v > max) { v = max; }
 
     const ngl_rect_t tr = track_rect(row);
-    const int16_t r = (int16_t)(SLIDER_H / 2);
+    const int16_t rad = (int16_t)(SLIDER_H / 2);
 
-    /* The knob overhangs the track at both ends and the percentage sits past
-       it, so the cleared area is the row from the track leftwards, not the
-       track. */
+    /* The knob overhangs the track at both ends and the value sits past it, so
+       the cleared area is the row from the track leftwards, not the track. */
     ngl_fill_rect(sc, ngl_rect((int16_t)(tr.x - 12), (int16_t)(row->y + 4),
                                (int16_t)(row->w - SLIDER_X + 12),
-                               (int16_t)(ROW_H - 8)), TH_BG);
-    ngl_fill_round_rect(sc, tr, r, TH_RULE);
+                               (int16_t)(s_row_h - 8)), TH_BG);
+    ngl_fill_round_rect(sc, tr, rad, TH_RULE);
 
-    const int16_t fw = (int16_t)((int32_t)tr.w * v / 100);
+    const int16_t fw = (int16_t)((int32_t)tr.w * v / max);
     if (fw > 0) {
-        ngl_fill_round_rect(sc, ngl_rect(tr.x, tr.y, fw, tr.h), r, TH_ACCENT);
+        ngl_fill_round_rect(sc, ngl_rect(tr.x, tr.y, fw, tr.h), rad, TH_ACCENT);
     }
 
     const ngl_rect_t knob = ngl_rect((int16_t)(tr.x + fw - 11),
                                      (int16_t)(tr.y - 6), 22, 22);
     ngl_fill_round_rect(sc, knob, 11, TH_GLOW);
 
-    char n[8];
-    snprintf(n, sizeof(n), "%d%%", v);
+    char n[16];
+    if (r->itext) {
+        r->itext(n, sizeof(n), v);
+    } else {
+        snprintf(n, sizeof(n), "%d%%", v);
+    }
     ngl_rect_t box = *row;
     text_right(sc, &box, n, TH_TEXT);
 }
@@ -1035,12 +1241,22 @@ static void paint_page(void)
     paint_tabs(sc);
 
     const tab_t *t = &TABS[s_tab];
+    if (t->paint) {
+        t->paint(sc);
+    }
     for (int i = 0; i < t->nrows; i++) {
         const ngl_rect_t row = row_rect(i);
         ngl_text(sc, (int16_t)(row.x + 4),
-                 (int16_t)(row.y + (ROW_H - ngl_font_small.height) / 2),
+                 (int16_t)(row.y + (s_row_h - ngl_font_small.height) / 2),
                  t->rows[i].label, &ngl_font_small, TH_TEXT_DIM);
-        ngl_hline(sc, row.x, (int16_t)(row.y + ROW_H - 1), row.w, TH_RULE);
+        ngl_hline(sc, row.x, (int16_t)(row.y + s_row_h - 1), row.w, TH_RULE);
+
+        /* A button is part of the frame, not part of the tick: what is written
+           on it does not change, so painting it once per tab is once too often
+           already. */
+        if (t->rows[i].kind == R_BUTTON && t->rows[i].btn) {
+            button_box(sc, button_rect(&row, t->rows[i].btn), t->rows[i].btn);
+        }
     }
 
     s_have_shown = false;            /* nothing on this page is cached yet */
@@ -1068,6 +1284,12 @@ static void tick(void)
     }
 
     const tab_t *t = &TABS[s_tab];
+
+    if (t->tick) {
+        t->tick(sc);
+        ngl_flush();
+        return;
+    }
 
     if (t->rows == ROWS_POWER) {
         s_pwr_ok = neos_power_read(&s_pwr);
@@ -1115,15 +1337,449 @@ static void tick(void)
                 break;
             }
             s_shown_i[i] = v;
-            paint_slider(sc, &row, v);
+            paint_slider(sc, &row, r, v);
             break;
         }
+        case R_BUTTON:
+            break;          /* painted with the frame, and never changes */
         }
     }
 
     s_have_shown = true;
     ngl_flush();
 }
+
+/** The frame and then the contents, which is what a page change costs. */
+static void repaint_tab(void)
+{
+    rows_layout();
+    paint_page();
+    tick();
+}
+
+/* ------------------------------------------------------------------ */
+/* Tasks                                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Every task in the machine, and a way to end one.
+ *
+ * Not a table of rows like the other tabs, because it is not a fixed list of
+ * readings - it is however many tasks happen to be running, which is thirty-odd
+ * and changes while you are looking at it. So this tab paints itself: one line
+ * per task, a page at a time, with its own cache so that a page of thirty lines
+ * costs the two or three cells that actually moved.
+ *
+ * The order comes from NeOS and is creation order, which never changes while a
+ * task lives. That is not a detail: every row here has a kill button on it, and
+ * a list that re-sorted itself by CPU twice a second would be a list where the
+ * row under your finger is not the row you aimed at.
+ */
+
+#define TASK_ROW_H     44
+#define MAX_TASK_ROWS  26
+#define TASK_HEAD_H    34
+#define TASK_FOOT_H    48
+
+/* Columns, measured in from the right edge of the row. The name gets whatever
+   is left, which in portrait is still twice what a task name needs. */
+#define TASK_BTN_W     64
+#define TASK_STACK_W   116
+#define TASK_CPU_W     84
+#define TASK_STATE_W   112
+
+/*
+ * A kill is two taps, and the second one has to be soon.
+ *
+ * Deleting a task is not undoable and cannot be made so - FreeRTOS abandons
+ * whatever the task was holding - so the button arms first and kills second. The
+ * timeout is what keeps an armed row from lying in wait: come back to this page
+ * a minute later and nothing is armed, because nothing should be.
+ */
+#define TASK_ARM_MS    3000
+
+/* How often the list is actually re-read. The page ticks four times as often as
+   this, and NeOS only recomputes the CPU share once a second anyway - walking
+   every TCB at tick rate would be paying for a figure that cannot have changed. */
+#define TASK_REREAD_MS 450
+
+static neos_task_t s_tasks[NEOS_TASKS_MAX];
+static int         s_ntasks;
+static int         s_task_page;
+static int         s_task_fit = 1;      /* rows that fit on the page right now */
+
+static uint32_t s_armed_id;
+static uint64_t s_armed_at;
+
+/* What is currently on each line, so a tick can tell whether to repaint it. */
+static char s_task_shown[MAX_TASK_ROWS][80];
+static int  s_task_visible;             /* lines with something on them */
+static int  s_shown_ntasks = -1;
+static int  s_shown_page    = -1;
+
+static ngl_rect_t tasks_area(void)
+{
+    const int16_t y = (int16_t)(s_area.y + tabs_h() + 8);
+    return ngl_rect((int16_t)(s_area.x + MARGIN), y,
+                    (int16_t)(s_area.w - 2 * MARGIN),
+                    (int16_t)(s_area.h - (y - s_area.y) - 8));
+}
+
+static ngl_rect_t task_row_rect(int i)
+{
+    const ngl_rect_t a = tasks_area();
+    return ngl_rect(a.x, (int16_t)(a.y + TASK_HEAD_H + i * TASK_ROW_H),
+                    a.w, TASK_ROW_H);
+}
+
+static ngl_rect_t task_foot_rect(void)
+{
+    const ngl_rect_t a = tasks_area();
+    return ngl_rect(a.x, (int16_t)(a.y + a.h - TASK_FOOT_H), a.w, TASK_FOOT_H);
+}
+
+/** The [x] button on a row, whether or not the row is allowed one. */
+static ngl_rect_t task_btn_rect(const ngl_rect_t *row)
+{
+    return ngl_rect((int16_t)(row->x + row->w - TASK_BTN_W),
+                    (int16_t)(row->y + (TASK_ROW_H - 32) / 2), TASK_BTN_W, 32);
+}
+
+/** The page button, or an empty rectangle when everything fits on one page. */
+static ngl_rect_t task_page_rect(void)
+{
+    const ngl_rect_t f = task_foot_rect();
+    if (s_ntasks <= s_task_fit) {
+        return ngl_rect(0, 0, 0, 0);
+    }
+    return ngl_rect((int16_t)(f.x + f.w - 160), (int16_t)(f.y + 6), 160, 36);
+}
+
+static int task_pages(void)
+{
+    if (s_task_fit <= 0) {
+        return 1;
+    }
+    const int p = (s_ntasks + s_task_fit - 1) / s_task_fit;
+    return p < 1 ? 1 : p;
+}
+
+static bool task_armed(const neos_task_t *t)
+{
+    return s_armed_id == t->id && t->id != 0 &&
+           (neos_uptime_ms() - s_armed_at) < TASK_ARM_MS;
+}
+
+/** One line, as text, for the "has this changed" comparison. */
+static void task_key(char *buf, int n, const neos_task_t *t)
+{
+    snprintf(buf, n, "%s|%u|%d|%u|%u|%u|%u|%d",
+             t->name, (unsigned)t->prio, (int)t->core, (unsigned)t->state,
+             (unsigned)t->cpu_permille, (unsigned)(t->stack_free >> 6),
+             (unsigned)t->flags, task_armed(t) ? 1 : 0);
+}
+
+static void paint_task_row(ngl_surface_t *sc, int i, const neos_task_t *t)
+{
+    const ngl_rect_t row = task_row_rect(i);
+    ngl_fill_rect(sc, row, TH_BG);
+
+    const int16_t ty = (int16_t)(row.y + (TASK_ROW_H - ngl_font_small.height) / 2);
+    const int16_t right = (int16_t)(row.x + row.w);
+
+    const int16_t btn_x   = (int16_t)(right - TASK_BTN_W);
+    const int16_t stack_x = (int16_t)(btn_x - TASK_STACK_W);
+    const int16_t cpu_x   = (int16_t)(stack_x - TASK_CPU_W);
+    const int16_t state_x = (int16_t)(cpu_x - TASK_STATE_W);
+
+    /*
+     * A service is one of ours and is named in the accent colour; a protected
+     * task is one nobody may touch and is dimmed. The colour is the same
+     * information the missing button carries, said in a way that reads down a
+     * column of thirty rows without hunting for gaps.
+     */
+    ngl_color_t nc = TH_TEXT;
+    if (t->flags & NEOS_TASK_SERVICE) {
+        nc = TH_ACCENT;
+    } else if (t->flags & NEOS_TASK_PROTECTED) {
+        nc = TH_TEXT_DIM;
+    }
+
+    ngl_rect_t namebox = ngl_rect(row.x, row.y, (int16_t)(state_x - row.x - 8),
+                                  TASK_ROW_H);
+    ngl_clip_set(sc, &namebox);
+    int16_t nx = ngl_text(sc, row.x, ty, t->name, &ngl_font_small, nc);
+
+    /* Priority and core, right after the name rather than in columns of their
+       own: they are what you look at once, when a row has already caught your
+       eye for some other reason. */
+    char pc[16];
+    if (t->core < 0) {
+        snprintf(pc, sizeof(pc), "  p%u", (unsigned)t->prio);
+    } else {
+        snprintf(pc, sizeof(pc), "  p%u c%d", (unsigned)t->prio, (int)t->core);
+    }
+    ngl_text(sc, nx, ty, pc, &ngl_font_small, TH_TEXT_FAINT);
+    ngl_clip_set(sc, NULL);
+
+    ngl_rect_t box = ngl_rect(state_x, row.y, TASK_STATE_W, TASK_ROW_H);
+    text_right(sc, &box, neos_task_state_name(t->state), TH_TEXT_DIM);
+
+    char buf[24];
+    /*
+     * Tenths of a percent, because most of this list is at zero and the
+     * interesting rows are at a tenth or two - a whole-percent column would show
+     * thirty noughts and one number, which says less than it looks like it does.
+     */
+    snprintf(buf, sizeof(buf), "%u.%u%%",
+             (unsigned)(t->cpu_permille / 10), (unsigned)(t->cpu_permille % 10));
+    box = ngl_rect(cpu_x, row.y, TASK_CPU_W, TASK_ROW_H);
+    text_right(sc, &box, buf, t->cpu_permille >= 100 ? TH_WARN : TH_TEXT);
+
+    fmt_bytes(buf, sizeof(buf), t->stack_free);
+    box = ngl_rect(stack_x, row.y, TASK_STACK_W, TASK_ROW_H);
+    text_right(sc, &box, buf, t->stack_free < 512 ? TH_BAD : TH_TEXT_DIM);
+
+    const ngl_rect_t btn = task_btn_rect(&row);
+    if (!(t->flags & NEOS_TASK_PROTECTED)) {
+        const bool armed = task_armed(t);
+        ngl_fill_round_rect(sc, btn, 6, armed ? TH_BAD : TH_CLOSE_FILL);
+        ngl_draw_round_rect(sc, btn, 6, armed ? TH_BAD : TH_CLOSE_LINE, 2);
+        text_centred(sc, &btn, armed ? "sure?" : "x", armed ? TH_BG : TH_CLOSE_X);
+    }
+
+    ngl_hline(sc, row.x, (int16_t)(row.y + TASK_ROW_H - 1), row.w, TH_RULE);
+}
+
+static void paint_task_foot(ngl_surface_t *sc)
+{
+    const ngl_rect_t f = task_foot_rect();
+    ngl_fill_rect(sc, f, TH_BG);
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%d task%s, %d service%s", s_ntasks,
+             s_ntasks == 1 ? "" : "s",
+             neos_service_count(), neos_service_count() == 1 ? "" : "s");
+    ngl_text(sc, f.x, (int16_t)(f.y + (TASK_FOOT_H - ngl_font_small.height) / 2 + 4),
+             buf, &ngl_font_small, TH_TEXT_DIM);
+
+    const ngl_rect_t pg = task_page_rect();
+    if (pg.w > 0) {
+        snprintf(buf, sizeof(buf), "page %d/%d", s_task_page + 1, task_pages());
+        button_box(sc, pg, buf);
+    }
+}
+
+static void tasks_read(void)
+{
+    s_ntasks = neos_tasks(s_tasks, NEOS_TASKS_MAX);
+    if (s_task_page >= task_pages()) {
+        s_task_page = task_pages() - 1;
+    }
+    if (s_task_page < 0) {
+        s_task_page = 0;
+    }
+}
+
+/** The frame: the column headings, and the room the rows will go in. */
+static void tasks_paint(ngl_surface_t *sc)
+{
+    const ngl_rect_t a = tasks_area();
+
+    s_task_fit = (a.h - TASK_HEAD_H - TASK_FOOT_H) / TASK_ROW_H;
+    if (s_task_fit < 1)             { s_task_fit = 1; }
+    if (s_task_fit > MAX_TASK_ROWS) { s_task_fit = MAX_TASK_ROWS; }
+
+    const int16_t right = (int16_t)(a.x + a.w);
+    const int16_t btn_x   = (int16_t)(right - TASK_BTN_W);
+    const int16_t stack_x = (int16_t)(btn_x - TASK_STACK_W);
+    const int16_t cpu_x   = (int16_t)(stack_x - TASK_CPU_W);
+    const int16_t state_x = (int16_t)(cpu_x - TASK_STATE_W);
+    const int16_t hy = (int16_t)(a.y + (TASK_HEAD_H - ngl_font_small.height) / 2);
+
+    ngl_text(sc, a.x, hy, "task", &ngl_font_small, TH_TEXT_FAINT);
+
+    ngl_rect_t box = ngl_rect(state_x, a.y, TASK_STATE_W, TASK_HEAD_H);
+    text_right(sc, &box, "state", TH_TEXT_FAINT);
+    box = ngl_rect(cpu_x, a.y, TASK_CPU_W, TASK_HEAD_H);
+    text_right(sc, &box, "cpu", TH_TEXT_FAINT);
+    box = ngl_rect(stack_x, a.y, TASK_STACK_W, TASK_HEAD_H);
+    text_right(sc, &box, "stack left", TH_TEXT_FAINT);
+
+    ngl_hline(sc, a.x, (int16_t)(a.y + TASK_HEAD_H - 1), a.w, TH_RULE);
+
+    /* Nothing is cached for a page that has just been drawn empty. */
+    s_task_visible  = 0;
+    s_shown_ntasks  = -1;
+    s_shown_page    = -1;
+}
+
+static void tasks_tick(ngl_surface_t *sc)
+{
+    static uint32_t since = TASK_REREAD_MS;      /* read on the first tick */
+
+    since += TICK_MS;
+    if (since >= TASK_REREAD_MS) {
+        since = 0;
+        tasks_read();
+    }
+
+    const int from = s_task_page * s_task_fit;
+    int shown = s_ntasks - from;
+    if (shown < 0)            { shown = 0; }
+    if (shown > s_task_fit)   { shown = s_task_fit; }
+
+    for (int i = 0; i < shown; i++) {
+        char key[80];
+        task_key(key, sizeof(key), &s_tasks[from + i]);
+        if (i < s_task_visible && strcmp(s_task_shown[i], key) == 0) {
+            continue;
+        }
+        snprintf(s_task_shown[i], sizeof(s_task_shown[i]), "%s", key);
+        paint_task_row(sc, i, &s_tasks[from + i]);
+    }
+
+    /* A task that has gone leaves a line behind it. Clearing is the only way
+       back: nothing else on this page ever paints over that row. */
+    for (int i = shown; i < s_task_visible; i++) {
+        ngl_fill_rect(sc, task_row_rect(i), TH_BG);
+    }
+    s_task_visible = shown;
+
+    if (s_ntasks != s_shown_ntasks || s_task_page != s_shown_page) {
+        s_shown_ntasks = s_ntasks;
+        s_shown_page   = s_task_page;
+        paint_task_foot(sc);
+    }
+}
+
+static bool tasks_tap(int16_t x, int16_t y)
+{
+    const ngl_rect_t pg = task_page_rect();
+    if (pg.w > 0 && ngl_rect_contains(&pg, x, y)) {
+        s_task_page = (s_task_page + 1) % task_pages();
+        s_armed_id  = 0;
+        repaint_tab();
+        return true;
+    }
+
+    const int from = s_task_page * s_task_fit;
+    for (int i = 0; i < s_task_visible; i++) {
+        const ngl_rect_t row = task_row_rect(i);
+        if (!ngl_rect_contains(&row, x, y)) {
+            continue;
+        }
+        neos_task_t *t = &s_tasks[from + i];
+        const ngl_rect_t btn = task_btn_rect(&row);
+
+        if ((t->flags & NEOS_TASK_PROTECTED) || !ngl_rect_contains(&btn, x, y)) {
+            /* A tap on the row but not on its button is how an armed row is
+               put back - the safe gesture has to be the easy one. */
+            s_armed_id = 0;
+            repaint_tab();
+            return true;
+        }
+
+        if (task_armed(t)) {
+            char msg[64];
+            const bool svc = (t->flags & NEOS_TASK_SERVICE) != 0;
+            if (neos_task_kill(t->id)) {
+                snprintf(msg, sizeof(msg), "%s %s", t->name,
+                         svc ? "asked to stop" : "deleted");
+            } else {
+                snprintf(msg, sizeof(msg), "%s would not go", t->name);
+            }
+            neos_status_for(msg, 2500);
+            s_armed_id = 0;
+            tasks_read();
+            repaint_tab();
+            return true;
+        }
+
+        s_armed_id = t->id;
+        s_armed_at = neos_uptime_ms();
+        paint_task_row(ngl_screen(), i, t);
+        ngl_flush();
+        return true;
+    }
+
+    s_armed_id = 0;
+    return true;        /* the tab owns every tap inside its own area */
+}
+
+/* ------------------------------------------------------------------ */
+/* A service, so that the thing this page can stop can also be started */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A tone that keeps playing after this app has gone.
+ *
+ * It is here because the alternative was an ABI nothing on the card exercises.
+ * Leaving a task behind is the one part of NeOS that cannot be checked by
+ * looking at a screen - the whole claim is about what happens after the screen
+ * belongs to somebody else - so the check is: start this, leave the app, and
+ * listen. Stop it from the list above, or wait for it to finish on its own.
+ *
+ * Sixteen samples of a sine and a phase accumulator, because apps have no libm
+ * and a test tone does not need one. Q12 on the increment gets 440 Hz to within
+ * a fraction of a hertz at the one rate the codec runs at.
+ */
+#define TONE_HZ        440
+#define TONE_SECONDS   30
+#define TONE_BLOCK     480      /* 10 ms, so a stop is noticed inside one */
+
+static const int16_t TONE_WAVE[16] = {
+        0,  3062,  5657,  7391,  8000,  7391,  5657,  3062,
+        0, -3062, -5657, -7391, -8000, -7391, -5657, -3062,
+};
+
+static void tone_service(void *arg)
+{
+    (void)arg;
+
+    if (!neos_audio_open()) {
+        printf("[system] tone service: the codec would not start\n");
+        return;
+    }
+    neos_audio_gain(60);
+
+    static int16_t block[TONE_BLOCK];
+    const uint32_t inc = (uint32_t)TONE_HZ * 16u * 4096u / NEOS_AUDIO_RATE;
+    uint32_t phase = 0;
+
+    const int blocks = TONE_SECONDS * NEOS_AUDIO_RATE / TONE_BLOCK;
+    for (int b = 0; b < blocks && !neos_service_stopping(); b++) {
+        for (int i = 0; i < TONE_BLOCK; i++) {
+            block[i] = TONE_WAVE[(phase >> 12) & 15];
+            phase += inc;
+        }
+        if (neos_audio_write(block, TONE_BLOCK) < 0) {
+            break;
+        }
+    }
+
+    neos_audio_close();
+    printf("[system] tone service done\n");
+}
+
+/*
+ * No "playing" state on the row, deliberately.
+ *
+ * The app cannot know when the tone has finished without asking NeOS for the
+ * task list on every tick of a tab that has nothing to do with tasks, and a row
+ * that said "playing" for twenty seconds after the sound stopped would be worse
+ * than a row that says nothing. What is running is a question the TASKS tab
+ * answers, and it is one tab away.
+ */
+static void tone_tap(void)
+{
+    if (neos_service_start("systone", tone_service, NULL, 8192)) {
+        neos_status_for("playing in the background - leave the app and listen", 3000);
+    } else {
+        neos_status_for("no free service slot - stop one in TASKS", 2500);
+    }
+}
+
 
 /* ------------------------------------------------------------------ */
 /* Input                                                               */
@@ -1180,11 +1836,18 @@ static bool drag_slider(void)
 
     const ngl_rect_t row = row_rect(s_drag);
     const ngl_rect_t tr = track_rect(&row);
-    int v = tr.w > 0 ? (int)(((int32_t)t.x - tr.x) * 100 / tr.w) : 0;
-    if (v < 0)   { v = 0; }
-    if (v > 100) { v = 100; }
-
     const row_t *r = &tab->rows[s_drag];
+    const int max = slider_max(r);
+    /*
+     * Rounded to the nearest step, not truncated. On a 0-100 track that is a
+     * pixel either way and nobody could tell; on an eleven-position one it is
+     * the difference between a knob that lands where the finger is and one that
+     * always reads a minute short.
+     */
+    int v = tr.w > 0 ? (int)((((int32_t)t.x - tr.x) * max + tr.w / 2) / tr.w) : 0;
+    if (v < 0)   { v = 0; }
+    if (v > max) { v = max; }
+
     if (r->iset) {
         r->iset(v);
     }
@@ -1205,14 +1868,17 @@ static void handle_tap(int16_t x, int16_t y)
                 if (TABS[i].rows == ROWS_SD) {
                     sd_measure();
                 }
-                paint_page();
-                tick();
+                repaint_tab();
             }
             return;
         }
     }
 
     const tab_t *tab = &TABS[s_tab];
+    if (tab->tap && tab->tap(x, y)) {
+        return;
+    }
+
     for (int i = 0; i < tab->nrows; i++) {
         const ngl_rect_t row = row_rect(i);
         if (!ngl_rect_contains(&row, x, y)) {
@@ -1223,7 +1889,7 @@ static void handle_tap(int16_t x, int16_t y)
             /* The whole row is the hit area, not just the 88 px switch. There
                is nothing else on the row to hit by mistake. */
             r->set(!r->get());
-        } else if (r->kind == R_ACTION && r->act) {
+        } else if ((r->kind == R_ACTION || r->kind == R_BUTTON) && r->act) {
             r->act();
         }
         return;
@@ -1249,8 +1915,7 @@ int main(int argc, char **argv)
 
     s_area = ngl_app_area();
     tabs_layout();
-    paint_page();
-    tick();
+    repaint_tab();
 
     /* Once, up front. Everything else on the page is a register read; this one
        walks the bus, so it happens where a pause does not look like a stall. */
@@ -1264,12 +1929,12 @@ int main(int argc, char **argv)
         if (area_moved()) {
             s_area = ngl_app_area();
             /* A rotation changes how many tabs fit on a row, so the strip is
-               re-measured before anything is placed against it. */
+               re-measured before anything is placed against it - and then the
+               rows, which get whatever height is left under it. */
             tabs_layout();
             printf("[system] screen changed to %dx%d, relaying out\n",
                    s_area.w, s_area.h);
-            paint_page();
-            tick();
+            repaint_tab();
         }
 
         const bool dragging = drag_slider();

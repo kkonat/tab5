@@ -333,6 +333,23 @@ int neos_backlight(void);
  */
 bool neos_backlight_set(int percent);
 
+/**
+ * Take the backlight to zero and back without changing the setting.
+ *
+ * NeOS only, not exported to apps: this is what sleeping the screen uses, and
+ * it deliberately goes below the floor neos_backlight_set() clamps to. A screen
+ * an app could switch off is a screen nobody could switch back on - but a screen
+ * NeOS switches off has a timer, a touch panel and an accelerometer between it
+ * and staying off.
+ *
+ * The stored brightness is untouched, so unblanking comes back to whatever the
+ * slider said and the slider is still telling the truth while it is dark.
+ */
+bool neos_backlight_blank(bool blank);
+
+/** Whether the backlight is currently blanked. */
+bool neos_backlight_blanked(void);
+
 /* ------------------------------------------------------------------ */
 /* Switchable rails                                                    */
 /* ------------------------------------------------------------------ */

@@ -280,10 +280,62 @@ bool neos_input_text(const char *title, char *buf, size_t size, uint32_t flags);
 bool neos_ui_busy(void);
 
 /* ------------------------------------------------------------------ */
+/* System panels                                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The pages behind the system bar's icons, which an app may also raise.
+ *
+ * Everything on them is NeOS's - the radio, the clock, the pack - so there was
+ * never an app-side version to write, and the bar is one tap away from every
+ * screen anyway. What the bar cannot do is be somewhere else: a settings page
+ * with a row of power readings on it is exactly where "and the rest of it"
+ * belongs, and sending the user off to hunt for an icon in the corner instead
+ * is how a row of numbers becomes a dead end.
+ *
+ * The numbers are ABI - an app names one - so append, never renumber.
+ */
+typedef enum {
+    NEOS_SYSPANEL_WIFI    = 1,
+    NEOS_SYSPANEL_CLOCK   = 2,
+    NEOS_SYSPANEL_BATTERY = 3,
+} neos_syspanel_t;
+
+/**
+ * Raise a system panel over this app.
+ *
+ * Returns at once: the panel runs on NeOS's own task and the app carries on
+ * running underneath it, with its draws dropped and its taps withheld for the
+ * duration, exactly as when the panel was opened from the bar. So an app that
+ * calls this keeps polling its own loop and finds out the panel has gone by
+ * neos_ui_busy() going false - there is nothing to wait for and nothing to
+ * clean up.
+ *
+ * Ignored while a panel is already up. There is one screen.
+ */
+void neos_syspanel_open(neos_syspanel_t p);
+
+/* ------------------------------------------------------------------ */
 /* The app registry                                                    */
 /* ------------------------------------------------------------------ */
 
-#define NEOS_APPS_MAX 12
+/*
+ * The most apps one card may hold.
+ *
+ * Generous rather than measured: the registry is 272 bytes an entry and is
+ * allocated once, from PSRAM, at the first scan - see neos_apps.c - so a cap
+ * nobody comes near costs 17 KB of the 32 MB there and nothing at all of the
+ * internal pool NeOS and the radio share. Held as a static array this would
+ * have been the other way round, and the figure would have had to be argued
+ * over rather than simply set out of reach.
+ *
+ * Raising it is safe in both directions and needs no ABI bump. An app built
+ * against a smaller value asks for fewer entries and sees fewer apps; one
+ * built against a larger value asks past the end and gets NULL from
+ * neos_apps_get(), which is what it gets for any index past the count anyway.
+ * Only the shell notices, and only by rebuilding.
+ */
+#define NEOS_APPS_MAX 64
 
 typedef struct {
     char     dir[32];      /**< directory under /apps, and the app's id */
@@ -365,3 +417,263 @@ _Static_assert(offsetof(neos_app_t, ok)      == 244, "neos_app_t layout is froze
 /* Appended at 1.15. Everything above it kept its offset, which is what makes
    that a minor rather than a major. */
 _Static_assert(offsetof(neos_app_t, category) == 245, "neos_app_t layout is frozen for ABI v1");
+
+/* ------------------------------------------------------------------ */
+/* Tasks                                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * What the machine is actually running, which is a great deal more than the
+ * app is.
+ *
+ * An app is one function on the boot task, and everything else on this tablet -
+ * touch, the bar, the radio, the SDIO transport underneath it, a background
+ * service some earlier app left behind - is a task it never sees. That is fine
+ * until something is eating the CPU or the RAM and the question is what, at
+ * which point a list of tasks is the only answer there is.
+ *
+ * Read-only apart from neos_task_kill(), and that one refuses the tasks NeOS
+ * needs - see below.
+ */
+
+/** Longest task name FreeRTOS keeps, including the terminator. */
+#define NEOS_TASK_NAME 16
+
+/** How many tasks neos_tasks() will describe in one call. */
+#define NEOS_TASKS_MAX 48
+
+typedef enum {
+    NEOS_TASK_RUNNING = 0,
+    NEOS_TASK_READY,
+    NEOS_TASK_BLOCKED,
+    NEOS_TASK_SUSPENDED,
+    NEOS_TASK_DELETED,
+    NEOS_TASK_UNKNOWN,
+} neos_task_state_t;
+
+/** NeOS needs this one: neos_task_kill() will refuse it. */
+#define NEOS_TASK_PROTECTED 0x01u
+/** Started by an app through neos_service_start(), and outliving it. */
+#define NEOS_TASK_SERVICE   0x02u
+
+typedef struct {
+    /*
+     * NeOS's own handle for the task, not FreeRTOS's.
+     *
+     * A handle is an address and addresses come back: a task that has exited
+     * frees its control block, the next task to start may be handed the same
+     * memory, and a list drawn a second ago would then have a row pointing at
+     * a task nobody asked about. Ids come from a counter and are never reused,
+     * so the id in a row that has gone stale matches nothing and
+     * neos_task_kill() refuses it instead of killing whatever took its place.
+     */
+    uint32_t id;
+    char     name[NEOS_TASK_NAME];
+    uint8_t  state;             /**< neos_task_state_t */
+    uint8_t  prio;
+    int8_t   core;              /**< -1 when the task is not pinned */
+    uint8_t  flags;             /**< NEOS_TASK_* */
+    uint32_t stack_free;        /**< low-water mark in bytes: the worst it ever got */
+    uint16_t cpu_permille;      /**< share of one core, 0-1000, over the last second */
+    uint16_t reserved;
+} neos_task_t;
+
+/**
+ * Describe every task in the system, oldest first.
+ *
+ * Returns how many were written, at most @p max. The order is the order the
+ * tasks were created in and does not change while they live, which is what
+ * makes a list with a kill button on each row safe to tap: sorting by anything
+ * that moves - CPU, state - is how a tap lands on a different task from the one
+ * it was aimed at.
+ *
+ * cpu_permille is measured over about a second, recomputed by whichever call
+ * first crosses that boundary. Calling this ten times a second is not ten times
+ * the cost and does not make the figure ten times as jumpy - the nine
+ * intervening calls report the same window.
+ */
+int neos_tasks(neos_task_t *out, int max);
+
+/** "running", "ready", "blocked", "suspended", "deleted", "?". */
+const char *neos_task_state_name(uint8_t state);
+
+/**
+ * End a task.
+ *
+ * @return true if the task is gone. False if @p id names nothing - a row that
+ *         has gone stale - or names a task carrying NEOS_TASK_PROTECTED.
+ *
+ * Protected is not a policy, it is the difference between a tablet and a brick:
+ * the idle tasks, the timer task, the TCP/IP stack, touch, the panel runner,
+ * and the task the calling app is itself running on. Killing any of those ends
+ * the session with nothing on screen to say why, and no list is worth that.
+ *
+ * A service (NEOS_TASK_SERVICE) is asked before it is killed: its stop flag is
+ * set, it gets half a second to notice through neos_service_stopping() and
+ * return, and only then is it deleted outright. Everything else is deleted
+ * outright immediately, because nothing else agreed to be asked.
+ *
+ * Deleting a task outright leaks whatever it was holding - its heap, its files,
+ * any mutex it was inside - and FreeRTOS cannot do otherwise. That is the
+ * honest price of the button, and the reason the protected list exists.
+ */
+bool neos_task_kill(uint32_t id);
+
+/* ------------------------------------------------------------------ */
+/* Background services                                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * One app is resident, and some of what an app does should not stop when it
+ * stops being the app you are looking at.
+ *
+ * A player is the case that forces it. Nothing about pulling a stream off the
+ * network and feeding the codec needs the screen, and a player that falls
+ * silent the moment you go and look at something else is not a player. So an
+ * app can leave a task behind: a function of its own that keeps running after
+ * main() returns, through the next app and the one after that, until it returns
+ * or it is stopped.
+ *
+ * What makes that possible is that NeOS keeps the app's image loaded for as
+ * long as one of its services is running. The service is ordinary app code at
+ * the address it was relocated to; freeing the image under it would be a jump
+ * into whatever the allocator did with those pages next. The image is freed
+ * when the last service from it exits, so a player left running costs its stack
+ * and its few hundred kilobytes of text, and a player that has finished costs
+ * nothing.
+ *
+ * What a service must not do is draw. The screen belongs to whichever app is
+ * resident, which is no longer this one, and a service that paints into it is
+ * painting over somebody else's window. Neither the surface nor the tap queue
+ * is fenced off - this is one address space and there is no way to fence them -
+ * so that is a rule rather than an enforcement. Sound, the network and the card
+ * are all fine; anything the user has to see belongs in the app.
+ */
+
+/** How many services can run at once, across all apps. */
+#define NEOS_SERVICES_MAX 4
+
+/** A service body. It ends by returning, and should return when asked. */
+typedef void (*neos_service_fn)(void *arg);
+
+/**
+ * Start @p fn on a task of its own, and keep this app's image loaded for as
+ * long as it runs.
+ *
+ * @param name   what the task is called in a list of tasks. Truncated to
+ *               NEOS_TASK_NAME-1, and prefixed with nothing: the app's own name
+ *               is worth putting in it.
+ * @param fn     the body. Called once with @p arg; the service ends when it
+ *               returns.
+ * @param arg    passed through untouched. It has to outlive the app, so it must
+ *               not point into main()'s frame - static storage, or something
+ *               malloc'd, is what this is for.
+ * @param stack  stack bytes, or 0 for a sensible default. A service that
+ *               touches the network or the card wants several kilobytes.
+ *
+ * @return the task id neos_tasks() reports for it, or 0 if it could not be
+ *         started - no free slot, no memory, or NeOS could not take on the
+ *         image.
+ *
+ * Started at a priority above the app and below input, so an app that
+ * busy-waits cannot starve a player and a player cannot make the glass feel
+ * slow.
+ */
+uint32_t neos_service_start(const char *name, neos_service_fn fn, void *arg,
+                            uint32_t stack);
+
+/**
+ * True once something has asked the calling service to stop.
+ *
+ * A service polls it the way an app polls neos_app_close_requested(), and for
+ * the same reason: a task running ordinary code cannot be stopped from outside
+ * without abandoning whatever it was holding. Returning promptly is the whole
+ * difference between a service that is stopped and one that is killed.
+ *
+ * False anywhere but inside a service, so shared code can call it safely.
+ */
+bool neos_service_stopping(void);
+
+/** How many services are running - this app's, and any other app's. */
+int neos_service_count(void);
+
+/* ------------------------------------------------------------------ */
+/* The screen, and the idle timer that turns it off                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Sleep on this machine is the screen going off, and nothing else stopping.
+ *
+ * The panel and its backlight are most of what the tablet spends, and they are
+ * also the only part that can be switched off and on again with nothing
+ * depending on the timing - so that is what sleeping is here. Tasks keep
+ * running, which is the point: a player left behind by neos_service_start()
+ * plays through it, the clock stays right, the pack keeps being recorded, and
+ * the network stays joined.
+ *
+ * What it is not is a lower clock. The PSRAM runs at 200 MHz and the display
+ * scans out of it over MIPI-DSI; dropping the CPU frequency under that moves
+ * both those timings, and a tablet that wakes up to a corrupt panel is worse
+ * than one that idles a little warm. Where polling can be slowed it is - touch
+ * drops to 8 Hz and the bar stops repainting - and that is the whole of the CPU
+ * saving.
+ *
+ * Any touch wakes it, and the touch that wakes it is swallowed rather than
+ * delivered: the first thing you do to a sleeping tablet is not a button press.
+ * So does picking it up, which is the accelerometer rather than the glass.
+ */
+
+/** The longest wait the setting allows, in minutes. */
+#define NEOS_IDLE_MAX_MIN 10
+
+/** Turn the screen off now. Everything else keeps running. */
+void neos_screen_off(void);
+
+/** Turn it back on, as a touch would. */
+void neos_screen_on(void);
+
+/** Whether the screen is currently off. */
+bool neos_screen_is_off(void);
+
+/**
+ * Tell the idle timer the user is still there.
+ *
+ * Touch does this by itself, so most apps never need it. What needs it is an
+ * app that is watched rather than used - a slideshow, a plot, a game played by
+ * tilting the tablet rather than tapping it - which would otherwise be switched
+ * off mid-frame by a timer measuring the one thing it is not doing.
+ *
+ * Wakes the screen if it is off, which also makes this how an app says "look at
+ * this now": an alarm, a timer that has finished, a message that has arrived.
+ */
+void neos_idle_poke(void);
+
+/**
+ * How long the tablet waits before turning the screen off, in minutes. Zero
+ * means never, which is what a tablet on a desk with a dashboard on it wants.
+ */
+int neos_idle_timeout_min(void);
+
+/**
+ * Set it, 0 to NEOS_IDLE_MAX_MIN. Saved, like the backlight: it is the
+ * machine's setting and not the app's, and a tablet that forgot it over a
+ * reboot would switch its screen off at a time nobody chose. False if the value
+ * is out of range.
+ */
+bool neos_idle_timeout_set(int minutes);
+
+/*
+ * neos_task_t is filled by the firmware into storage the app owns, so its
+ * layout is compiled into every app that reads one. Same rule as neos_app_t:
+ * appending a field is a minor, moving one is a major, and this is where you
+ * find out rather than in a wrong number on a list.
+ */
+_Static_assert(sizeof(neos_task_t) == 32, "neos_task_t layout is frozen for ABI v1");
+_Static_assert(offsetof(neos_task_t, id)           ==  0, "neos_task_t layout is frozen for ABI v1");
+_Static_assert(offsetof(neos_task_t, name)         ==  4, "neos_task_t layout is frozen for ABI v1");
+_Static_assert(offsetof(neos_task_t, state)        == 20, "neos_task_t layout is frozen for ABI v1");
+_Static_assert(offsetof(neos_task_t, prio)         == 21, "neos_task_t layout is frozen for ABI v1");
+_Static_assert(offsetof(neos_task_t, core)         == 22, "neos_task_t layout is frozen for ABI v1");
+_Static_assert(offsetof(neos_task_t, flags)        == 23, "neos_task_t layout is frozen for ABI v1");
+_Static_assert(offsetof(neos_task_t, stack_free)   == 24, "neos_task_t layout is frozen for ABI v1");
+_Static_assert(offsetof(neos_task_t, cpu_permille) == 28, "neos_task_t layout is frozen for ABI v1");

@@ -18,6 +18,7 @@
 #include "neos_msg.h"
 #include "neos_net.h"
 #include "neos_orient.h"
+#include "neos_screen.h"
 #include "neos_status.h"
 #include "neos_touch.h"
 #include "neos_ui.h"
@@ -347,6 +348,9 @@ static void run_chain(const char *autorun)
         s_close_requested = false;
         strlcpy(s_self, a->dir, sizeof(s_self));
         ESP_LOGI(TAG, "==== running \"%s\" ====", a->name);
+        /* Starting an app is somebody doing something, and the screen must be on
+           to see the app they asked for - a launch over the console included. */
+        neos_idle_poke();
         neos_touch_drop();
         neos_msg_none();          /* the app owns the screen now */
         neos_bar_set_closable(strcmp(a->dir, autorun) != 0);

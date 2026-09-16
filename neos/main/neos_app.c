@@ -12,6 +12,7 @@
 #include "neos_app.h"
 #include "neos_audio.h"
 #include "neos_crash.h"
+#include "neos_tasks.h"
 
 static const char *TAG = "neos";
 
@@ -159,11 +160,41 @@ bool neos_app_run(const char *appdir, const char *dirname,
     neos_crumb_leave();
 
     /*
+     * What the app left running decides what happens to its image.
+     *
+     * An app is its ELF, relocated into PSRAM, and until now returning from
+     * main() was the end of both. A service is app code on a task of its own, so
+     * an image freed here with one still running would be a jump into whatever
+     * the allocator did with those pages next. neos_service_adopt_image() takes
+     * the image over and empties the handle, which turns the deinit below into
+     * the no-op it has to be; the keeper frees it when the last service is gone.
+     *
+     * A service and no room to keep its image is the one case with nothing good
+     * in it. Stopping the services is the answer that does not crash.
+     */
+    const int services = neos_service_count();
+    if (services > 0) {
+        if (neos_service_adopt_image(&elf)) {
+            ESP_LOGI(TAG, "  %d service(s) left running - image kept", services);
+        } else {
+            ESP_LOGW(TAG, "  cannot keep the image - stopping %d service(s)", services);
+            neos_service_stop_all();
+        }
+    }
+
+    /*
      * Anything the app took and did not give back has to be given back here.
      * Returning from main() is the only exit an app has, so this is the only
      * place a leak of something system-wide can be caught.
+     *
+     * Except while a service is running, and the speaker is why the exception
+     * exists: a player left behind is a player still writing to the codec, and
+     * closing the stream under it would silence exactly the thing the service
+     * was for. The last service out does this instead - see svc_retire_locked().
      */
-    neos_audio_app_release();
+    if (neos_service_count() == 0) {
+        neos_audio_app_release();
+    }
 
     esp_elf_deinit(&elf);
     return err == 0;

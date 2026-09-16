@@ -113,3 +113,17 @@ CONFIG_LWIP_SNTP_UPDATE_DELAY=3600000
 # open its sixteenth socket during a weather refresh. Each slot is a handful
 # of bytes; the number that matters is in lwIP's PCB pools, not here.
 CONFIG_LWIP_MAX_SOCKETS=24
+
+# --- the task list ------------------------------------------------------
+# System > Tasks reads uxTaskGetSystemState(), which is the trace facility, and
+# shows a CPU share per task, which is the run-time stats counter underneath it.
+# Neither exists without being asked for: without the first the call is not
+# compiled in at all, and without the second every task reports zero and the
+# column is a row of noughts that looks like a bug in the page.
+#
+# What they cost is a word or two per TCB and an esp_timer read on every context
+# switch. On a tablet whose job is running one app at a time that is not
+# measurable; on something counting microseconds it would be, which is why the
+# IDF leaves them off by default.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y

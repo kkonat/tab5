@@ -1,0 +1,7 @@
+# The host test binary, and the frames `run.sh shot` paints. Neither is source:
+# the frames are regenerated from the app's own layout in a second, which is
+# cheaper than carrying two megabytes of screenshot in a source tree.
+test_synth1
+test_synth1.exe
+shot-*.ppm
+shot-*.png

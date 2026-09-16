@@ -23,6 +23,36 @@ different shell comes up.
 | <img src="images/20260904-212113-nupogodi.png" alt="Nu, pogodi!"> | **Nu, pogodi!** — a КБ1013ВК1-2 emulator, and mostly an exercise in not owning the clock. The game is 1856 bytes of mask ROM; a block of 128 instructions is 256 ticks of the piezo pin, which resamples to exactly 375 frames at 48 kHz, and `neos_audio_write()` does not return until the codec has taken them — so handing over a block of sound *is* letting 7.8 ms of game time go by. There is no timer in the app and no way for the emulated clock and the audible one to drift. The segment artwork it draws is built by [genlcd](tools/genlcd/) and is not in the repo. |
 | <img src="images/20260904-125745-system.png" alt="System app"> | **System** — readings and switches. IO, sensors, power, peripherals, network, the card, and the build itself. Every row is a table entry plus a function that fills a string, and a value cell is repainted only on the tick its text actually changed. |
 | <img src="images/20260908-174522-lanscan.png" alt="LAnSCan"> | **LAnSCan** — what else is on this network, and mostly an exercise in having one thread. A port of a terminal scanner that runs a stage per thread and blocks in each; here every stage is a state machine asked to make some progress and give the loop back, because an app runs on NeOS's own stack and a blocking `recv()` is not a slow scanner, it is a close button that has stopped working. The tablet is also *on* the segment it is looking at, so every echo request has to resolve its destination first and a sweep fills the stack's ARP table with everything that is really there — including the hosts that ignore ICMP. ARP is the discovery stage; the port knock only visits addresses that answered something. Names come from mDNS, SSDP, NetBIOS and SNMP; vendors from the IEEE registry, binary-searched off the card by [genoui](tools/genoui/) rather than held in memory. |
+| <img src="images/20260912-190023-radio.png" alt="Radio"> | **Radio** — internet radio, and mostly an exercise in what has to happen first. One loop does all three jobs: the stream is polled before anything else because it is the only stage that can be starved by being late — a socket left unread while the codec is being fed backs up in lwIP, and the window is a few hundred milliseconds wide — then the speaker is fed, and the screen gets whatever is left. HTTP and the ICY metadata demux are the app's own eighty lines, over `neos_tls_*` when the URL says `https`, because mbedTLS and a certificate bundle are larger than this entire app. MP3 through minimp3, a seven-biquad EQ whose drawn curve is the cascade the sound actually goes through, and three seconds of ring that is deliberately *not* dropped on a reconnect: a stumble that is over inside it is a stumble nobody hears. Stations are `name | url | flags` in a text file next to the app on the card. |
+| <img src="images/20260912-194542-wifiscan.png" alt="WiFiScan"> | **WiFiScan** — the 2.4 GHz band, drawn. One translucent bell per network, centred on its channel: the overlap is the thing worth looking at and is the reason this is not a list, so the fill is what makes a pile-up on channel 6 visibly a pile-up and the outline is what keeps each network followable through it. The bell is a Gaussian rather than a real spectral mask, with sigma set so that ±2σ is the 22 MHz a channel occupies — the question is how much two radios tread on each other, and the answer to that is the overlap area. Colour is bound to the name rather than to the row, and kept for as long as the app runs; a hue that changed every three seconds because a neighbour appeared would carry no information at all. It is also the one place an app leaves the system's green, and everything that is not a network stays in `TH_*` so the colour reads as data. The plot repaints all or nothing, which is deliberate: when a scan lands, every bell has moved. |
+
+Two apps are missing from that table, because neither draws where the rest of
+them draw. [Synth1](apps/synth1/) and [Moog](apps/moog/) take the whole panel
+— no system bar, and their own rotation — and their canvas is already the
+panel's native 720x1280 with the landscape turn folded into the coordinates, so
+no frame goes through the PPA's rotate. `lab/defender` is where that was
+measured: the PPA scales in order at 85 Mpixels/s and rotates at 19, because a
+rotate writes a column where it read a row and PSRAM never gets to burst. The
+turn lives in [apps/common/turn](apps/common/turn/) and the two of them share it,
+along with the widgets, so two synthesisers on one machine do not look like two
+programs by two people.
+
+Which is also why `do.ps1 screencap` cannot see either app: it captures the
+logical back buffer, and these never draw there. **The two pictures below were
+painted on a PC by the app's own test harness**, read back through the same map
+the panel uses — real frames of real code, but not photographs of a tablet.
+
+| | |
+|---|---|
+| <img src="images/shot-page1.png" alt="Moog, page 1"> | **Moog**, page 1 — CONTROLLERS and the OSCILLATOR BANK: what the sound is made of. Thirty-six controls will not fit across 1280 pixels, so the panel is cut where the instrument is and `<` `>` at the edges change pages. The master fader stays on the right of both, because it belongs to neither: a volume you have to change pages to find is a volume you cannot turn down in a hurry. Low-note priority and single trigger, which is the Model D's: the lowest key held is the one that sounds, and the contours restart only when the gate rises, so a note pressed under one already sounding slides rather than strikes. |
+| <img src="images/shot-page2.png" alt="Moog, page 2"> | **Moog**, page 2 — MIXER and MODIFIERS: how much of each, and what happens to it. Three oscillators, noise, the external input returned to the mixer, a four-pole ladder and two contours. The voice runs on a pthread, which comes up at priority 5 against the boot task's 1, so the scheduler takes the core away from whatever is repainting the instant the codec has room and nothing in the panel has to be quick for the sound to be continuous; the patch crosses into it under a seqlock. The unit of repainting is the control — dragging a knob costs about 20,000 pixels of 921,600. The header counts frames, the audio load as a fraction of real time, and `u`, the underruns, which is the only number with a veto and is drawn in red. |
+
+[Synth1](apps/synth1/) is the bench those two decisions were taken on: one
+oscillator, an LFO and a scope, built to answer whether this machine can feed a
+codec every five milliseconds and still let a knob move under a finger. The
+interesting number there was never what the voice cost but what was left, which
+is why it reports the block time, the worst block time, and how much sound the
+speaker had left when the last one was handed over.
 
 System panels belong to the firmware, so they are the same wherever you are:
 
@@ -76,7 +106,7 @@ the table can be reordered and grown freely and older apps keep running. An app
 that draws with `ngl` carries none of it — `hello` is a couple of kilobytes on
 the card.
 
-**The ABI is versioned honestly.** `NEOS_ABI_MAJOR.MINOR`, currently 1.19; see
+**The ABI is versioned honestly.** `NEOS_ABI_MAJOR.MINOR`, currently 1.23; see
 [neos_abi.h](neos/components/neos_api/include/neos_abi.h). Minor is additive.
 The firmware defines one small object per released minor and an app emits a
 reference to the single row it was built against, so the *linker and the
@@ -114,6 +144,15 @@ an app's own transient work that nothing else in the system has an opinion
 about, and it still cannot decide which network the tablet is on or whether
 there is one. `lanscan` is the app that wanted it.
 
+TLS is in there too, and is the one thing in that file an app could not write
+for itself: mbedTLS and a certificate bundle are a few hundred kilobytes, and
+an app is fifty all in. It adds no code to the firmware — the weather fetch has
+been going out over TLS since there was a weather fetch — only a door to what
+was already on the tablet. What it is not is HTTP: the session is a byte
+stream, and what goes through it is the app's business. `radio` speaks its own
+HTTP and ICY over one; something speaking a protocol nobody has written yet
+would want exactly the same thing.
+
 ## Repo layout
 
 | Path | What |
@@ -121,7 +160,8 @@ there is one. `lanscan` is the app that wanted it.
 | [neos/](neos/) | The firmware. `main/` holds bring-up, the boot chain, the system bar, the panels and the console link. |
 | [neos/components/ngl/](neos/components/ngl/) | The graphics library, exported to apps. |
 | [neos/components/neos_api/](neos/components/neos_api/) | The ABI headers — the whole app-visible surface. |
-| [apps/](apps/) | Apps, one IDF project each: `launcher`, `hello`, `clock`, `mandel`, `matrix`, `system`, `nupogodi`, `lanscan`. |
+| [apps/](apps/) | Apps, one IDF project each: `launcher`, `hello`, `clock`, `mandel`, `matrix`, `system`, `nupogodi`, `lanscan`, `radio`, `wifiscan`, `synth1`, `moog`. |
+| [apps/common/](apps/common/) | Source shared between apps, by `#include` and a `sources.cmake` rather than as a component: the landscape turn, the knobs and switches the two synthesisers draw, and a little fast maths. Not a project — `build-all` looks for a `CMakeLists.txt` and so walks past it. |
 | `lab/` | Not here. An app that is not ready to publish is kept in a separate private repo, cloned to `lab/` and gitignored; the build, upload and card scripts look there as well as in `apps/`. An app is at the same depth either way, so publishing one is a move. |
 | [scripts/](scripts/) | Toolchain setup, build, flash, upload, screenshot, boot capture, card deploy, ABI check, stock-flash restore. Every one of them, with its invocations, in [scripts/SCRIPTS.md](scripts/SCRIPTS.md). |
 | [tools/](tools/) | Build-time generators for fonts, icons and glyphs, the emulator's artwork and the MAC vendor registry. Their output is checked in, except genlcd's and genoui's, neither of which is ours. |
@@ -184,7 +224,7 @@ The whole repo at once — the firmware, every app, the ABI check, and, with
 `flash-os`, the tablet and the card as well:
 
 ```powershell
-.\do.ps1 build-all                         # eight projects, then abi_check
+.\do.ps1 build-all                         # thirteen projects, then abi_check
 .\do.ps1 build-all -Quiet -Apps clock      # one app, one line of output
 .\do.ps1 flash-os                          # build, flash, fill the card
 ```
@@ -195,8 +235,8 @@ what it does, for when one project is all that is wanted.
 
 Each app is a separate IDF project, so each compiles the whole IDF — a thousand
 objects, 186 MB of build tree — to link an ELF of a couple of KB against
-`libmain.a` alone. Since the seven sdkconfigs are identical that is one build
-done seven times, and `build-all` runs ccache over it: the first app compiles
+`libmain.a` alone. Since the twelve sdkconfigs are identical that is one build
+done twelve times, and `build-all` runs ccache over it: the first app compiles
 902 files in 211 s, the next hits cache on 98% of them and takes 78 s.
 [scripts/SCRIPTS.md](scripts/SCRIPTS.md) has the two settings it took to get
 that from 0%.

@@ -1,6 +1,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -17,12 +18,40 @@
 #include "neos_weather.h"
 #include "neos_api.h"
 #include "neos_boot.h"
+#include "neos_screen.h"
+#include "neos_tasks.h"
 #include "neos_touch.h"
+#include "neos_ui.h"
 #include "neos_syscalls.h"
 
 /* ------------------------------------------------------------------ */
 /* Syscall surface exported to apps                                    */
 /* ------------------------------------------------------------------ */
+
+/*
+ * The long-long division helpers, from libgcc.
+ *
+ * Declared here because there is no header for them - they are what the
+ * compiler emits, not something anybody calls by name - and exported because
+ * this ABI hands apps a uint64_t and then could not divide it.
+ * neos_uptime_ms() and neos_uptime_us() both return one, so
+ * `neos_uptime_ms() / 1000` is the most natural line anybody will ever write
+ * against this header, and until now it produced an app that would not load
+ * with "Can't find common __udivdi3" - a trap set by the ABI itself, sprung
+ * at the loader, three steps from anything to do with time.
+ *
+ * Four entries, against code the firmware is already linked with. Taking their
+ * addresses is also what pulls them in, since the firmware does not otherwise
+ * divide a 64-bit number.
+ *
+ * Note which ones are NOT here: the float and double helpers stay out, and
+ * apps stay compiled -Werror=double-promotion. Dividing a timestamp is a thing
+ * every app does; doing arithmetic in double is not.
+ */
+extern unsigned long long __udivdi3(unsigned long long, unsigned long long);
+extern long long          __divdi3(long long, long long);
+extern unsigned long long __umoddi3(unsigned long long, unsigned long long);
+extern long long          __moddi3(long long, long long);
 
 int neos_log(const char *msg)
 {
@@ -60,6 +89,27 @@ NEOS_ABI_GUARDS(NEOS_ABI_DEFINE)
 void neos_sleep_ms(uint32_t ms)
 {
     vTaskDelay(pdMS_TO_TICKS(ms));
+}
+
+/*
+ * The app-facing name for a bar panel.
+ *
+ * A thunk rather than exporting neos_ui_open() itself, because the two enums are
+ * deliberately separate: neos_panel_t is NeOS's own list and grows whenever a
+ * panel is added, while neos_syspanel_t is ABI and every value in it is compiled
+ * into apps already on the card. Mapping them here by name means a panel can be
+ * added, renumbered or reordered on this side without touching anything an app
+ * was built against - and an app naming a panel this firmware does not have gets
+ * nothing rather than whatever landed at that number.
+ */
+void neos_syspanel_open(neos_syspanel_t p)
+{
+    switch (p) {
+    case NEOS_SYSPANEL_WIFI:    neos_ui_open(NEOS_PANEL_WIFI);    break;
+    case NEOS_SYSPANEL_CLOCK:   neos_ui_open(NEOS_PANEL_CLOCK);   break;
+    case NEOS_SYSPANEL_BATTERY: neos_ui_open(NEOS_PANEL_BATTERY); break;
+    default: break;
+    }
 }
 
 /*
@@ -116,6 +166,49 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
        gcc will synthesise a call to this one for a struct comparison the app
        never wrote as a function call. */
     ESP_ELFSYM_EXPORT(memcmp),
+    /* strstr is the one everybody reaches for and the one the loader's table
+       does not have, so two apps have now written it. The other three are its
+       neighbours: comparing a bounded or case-blind string is what reading a
+       header, a config line or a filename comes down to. */
+    ESP_ELFSYM_EXPORT(strstr),
+    ESP_ELFSYM_EXPORT(strncmp),
+    ESP_ELFSYM_EXPORT(strcasecmp),
+    ESP_ELFSYM_EXPORT(strncasecmp),
+
+    /* Sixty-four bit division; see the note above these. */
+    ESP_ELFSYM_EXPORT(__udivdi3),
+    ESP_ELFSYM_EXPORT(__divdi3),
+    ESP_ELFSYM_EXPORT(__umoddi3),
+    ESP_ELFSYM_EXPORT(__moddi3),
+
+    /*
+     * The float half of <math.h>, and only the float half.
+     *
+     * An app that wants a cosine currently writes one - radio carries two
+     * hundred and seventy lines of minimax polynomial to draw a tape deck and
+     * design six biquads - or reaches for cos() and finds out at load time
+     * that the double helpers are not all here. The first is a waste and the
+     * second teaches the wrong lesson at the worst moment.
+     *
+     * Exporting the f variants alone settles it in the direction the rest of
+     * the ABI already points: sinf() works, sin() still does not, and the
+     * reason is the same one every other header gives - this machine has a
+     * single-precision FPU and nothing that crosses this line trades in
+     * doubles. A dozen entries against newlib the firmware already links.
+     */
+    ESP_ELFSYM_EXPORT(sinf),
+    ESP_ELFSYM_EXPORT(cosf),
+    ESP_ELFSYM_EXPORT(tanf),
+    ESP_ELFSYM_EXPORT(atanf),
+    ESP_ELFSYM_EXPORT(atan2f),
+    ESP_ELFSYM_EXPORT(sqrtf),
+    ESP_ELFSYM_EXPORT(expf),
+    ESP_ELFSYM_EXPORT(logf),
+    ESP_ELFSYM_EXPORT(log10f),
+    ESP_ELFSYM_EXPORT(powf),
+    ESP_ELFSYM_EXPORT(fmodf),
+    ESP_ELFSYM_EXPORT(floorf),
+    ESP_ELFSYM_EXPORT(ceilf),
 
     /* ngl: screen and surfaces */
     ESP_ELFSYM_EXPORT(ngl_screen),
@@ -254,6 +347,24 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     ESP_ELFSYM_EXPORT(neos_net_scan_results),
 
     /*
+     * Asking for a scan is on this side of that line, and it was an oversight
+     * that it was not here already: neos_net.h documents the poll-and-reread
+     * loop for apps, and an app that can watch neos_net_scanning() but never
+     * make it true can only ever redraw whatever NeOS last happened to find.
+     * Which is nothing at all once the tablet is associated, since the
+     * reconnect loop only scans while it is looking for somewhere to go.
+     *
+     * It steers nothing. The radio comes back to its home channel on its own,
+     * the call refuses when the stack is down or a scan is already up, and
+     * autojoin acts only on a scan the network task started itself - so an app
+     * scanning cannot associate the tablet with anything. What it does cost is
+     * a couple of seconds of the link being off-channel, which is why the one
+     * app that uses this leaves a gap between passes rather than running them
+     * back to back.
+     */
+    ESP_ELFSYM_EXPORT(neos_net_scan_start),
+
+    /*
      * The wire underneath it, which is a different question and gets a
      * different answer - see the header for why one of these lists is
      * read-only and the other is not.
@@ -276,6 +387,20 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     ESP_ELFSYM_EXPORT(neos_sock_wait),
     ESP_ELFSYM_EXPORT(neos_sock_set),
     ESP_ELFSYM_EXPORT(neos_sock_join),
+    /* The name lookup every connection starts with. Here rather than in each
+       app, which is where it had got to being written twice. */
+    ESP_ELFSYM_EXPORT(neos_resolve),
+
+    /* TLS, for the hosts that will not talk without it. The one thing on the
+       wire an app genuinely cannot do for itself: mbedTLS and a certificate
+       bundle are larger than any app on the card, and both are already in
+       this image for the weather. */
+    ESP_ELFSYM_EXPORT(neos_tls_open),
+    ESP_ELFSYM_EXPORT(neos_tls_status),
+    ESP_ELFSYM_EXPORT(neos_tls_send),
+    ESP_ELFSYM_EXPORT(neos_tls_recv),
+    ESP_ELFSYM_EXPORT(neos_tls_fd),
+    ESP_ELFSYM_EXPORT(neos_tls_close),
     ESP_ELFSYM_EXPORT(neos_iface),
     ESP_ELFSYM_EXPORT(neos_neigh_table),
     ESP_ELFSYM_EXPORT(neos_neigh_ask),
@@ -342,6 +467,44 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     /* The shell's way of letting a crashed app be tried again. Quarantine has
        to be undoable by the person holding the tablet - see neos_api.h. */
     ESP_ELFSYM_EXPORT(neos_apps_unquarantine),
+
+    /*
+     * The pages behind the bar's icons, raised from somewhere that is not the
+     * bar. Everything on them belongs to NeOS, so there is nothing here but the
+     * way in - see neos_api.h.
+     */
+    ESP_ELFSYM_EXPORT(neos_syspanel_open),
+
+    /*
+     * What the machine is running, and the one thing that can be done about it.
+     *
+     * The list is read-only and the kill refuses everything NeOS needs, which is
+     * what makes this safe to hand out at all - see neos_api.h for where that
+     * line falls.
+     */
+    ESP_ELFSYM_EXPORT(neos_tasks),
+    ESP_ELFSYM_EXPORT(neos_task_state_name),
+    ESP_ELFSYM_EXPORT(neos_task_kill),
+
+    /*
+     * Background services: an app leaving a task behind, and NeOS keeping its
+     * image loaded for as long as that task runs. The player case is the whole
+     * reason - see neos_api.h.
+     */
+    ESP_ELFSYM_EXPORT(neos_service_start),
+    ESP_ELFSYM_EXPORT(neos_service_stopping),
+    ESP_ELFSYM_EXPORT(neos_service_count),
+
+    /*
+     * Sleeping, which on this machine is the screen and nothing else. An app can
+     * ask for it, ask to be left alone by it, and set how long it waits.
+     */
+    ESP_ELFSYM_EXPORT(neos_screen_off),
+    ESP_ELFSYM_EXPORT(neos_screen_on),
+    ESP_ELFSYM_EXPORT(neos_screen_is_off),
+    ESP_ELFSYM_EXPORT(neos_idle_poke),
+    ESP_ELFSYM_EXPORT(neos_idle_timeout_min),
+    ESP_ELFSYM_EXPORT(neos_idle_timeout_set),
 
     /* Game mode: the app takes the whole panel and draws its own way out.
        Undone by NeOS when the app returns - see neos_api.h. */

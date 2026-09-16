@@ -1,8 +1,10 @@
 #include <dirent.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "bsp/m5stack_tab5.h"
@@ -15,13 +17,42 @@ static const char *TAG = "neos";
 
 #define APPS_DIR BSP_SD_MOUNT_POINT "/apps"
 
-static neos_app_t s_apps[NEOS_APPS_MAX];
-static int        s_count;
-static uint32_t   s_generation;
+/*
+ * The registry, on the heap and in PSRAM rather than in a static array.
+ *
+ * NEOS_APPS_MAX is set well past anything a card will really hold, which is
+ * the right way round for a limit nobody should ever meet - but only if
+ * meeting it is what costs, rather than declaring it. An entry is 272 bytes,
+ * so the cap as a static array is 68 KB of internal RAM reserved for ever
+ * against a card with a dozen directories on it, out of the same pool NeOS,
+ * the radio and every app's fast allocations come from. Out of PSRAM it is 68
+ * KB of 32 MB, taken once at boot.
+ *
+ * Allocated at the first scan and kept: neos_apps_get() and neos_apps_find()
+ * hand out pointers into it that callers hold across a redraw, so it must not
+ * move, and there is no moment worth freeing it at.
+ */
+static neos_app_t *s_apps;
+static int         s_count;
+static uint32_t    s_generation;
 
 int neos_apps_scan(void)
 {
     s_count = 0;
+
+    if (!s_apps) {
+        s_apps = heap_caps_calloc(NEOS_APPS_MAX, sizeof(neos_app_t),
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_apps) {
+            /* No PSRAM, or none left. Internal will do - the alternative is a
+               tablet with no apps on it, which is worse than a tight heap. */
+            s_apps = calloc(NEOS_APPS_MAX, sizeof(neos_app_t));
+        }
+        if (!s_apps) {
+            ESP_LOGE(TAG, "no memory for the app registry");
+            return 0;
+        }
+    }
 
     DIR *d = opendir(APPS_DIR);
     if (!d) {
@@ -57,6 +88,17 @@ int neos_apps_scan(void)
         s_count++;
     }
     closedir(d);
+
+    /*
+     * Say so when the shelf is full, because the way this used to fail was in
+     * silence: the loop above stops at the cap and the thirteenth directory on
+     * the card simply never appeared, which reads as an upload that did not
+     * work rather than as a limit that was reached.
+     */
+    if (s_count >= NEOS_APPS_MAX) {
+        ESP_LOGW(TAG, "the registry is full at %d - any further app directory "
+                      "on the card is not being listed", NEOS_APPS_MAX);
+    }
 
     s_generation++;
     ESP_LOGI(TAG, "%d app%s on the card", s_count, s_count == 1 ? "" : "s");

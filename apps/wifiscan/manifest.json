@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "id": "com.kk.wifiscan",
+  "name": "WiFiScan",
+  "description": "the 2.4 GHz band, drawn",
+  "version": "0.1.0",
+  "type": "elf",
+  "entry": "app.elf",
+  "category": "Tools",
+  "api": 2
+}

@@ -35,6 +35,7 @@
 #include "neos_app.h"
 #include "neos_crash.h"
 #include "neos_orient.h"
+#include "neos_screen.h"
 #include "neos_status.h"
 #include "neos_syscalls.h"
 #include "neos_sys.h"
@@ -194,6 +195,13 @@ void app_main(void)
 
     neos_touch_init();
     neos_upload_init();
+
+    /*
+     * After touch, because a touch is what wakes the screen back up and a timer
+     * that could put it to sleep before there was any way out of that would be
+     * a tablet that has to be power-cycled.
+     */
+    neos_screen_init();
 
     neos_syscalls_register();
 
