@@ -17,6 +17,7 @@ idf_component_register(SRCS "neos_main.c"
                             "neos_time.c"
                             "neos_net.c"
                             "neos_sock.c"
+                            "neos_midi.c"
                             "neos_tls.c"
                             "neos_weather.c"
                             "neos_panel_clock.c"
@@ -29,6 +30,10 @@ idf_component_register(SRCS "neos_main.c"
                        INCLUDE_DIRS "."
                        REQUIRES json nvs_flash esp_lcd esp_lcd_touch ngl neos_api bmi270 esp_timer sdmmc
                                 esp_driver_usb_serial_jtag esp_driver_i2c esp_driver_tsens
+                                # The USB-A socket, as a host: neos_midi.c is a MIDI class
+                                # driver on the IDF host library. See the note in
+                                # idf_component.yml about which "usb" this resolves to.
+                                usb
                                 esp_io_expander espressif__esp_io_expander_pi4ioe5v6408 esp_codec_dev esp_wifi esp_netif esp_event lwip
                                 # The weather service: one plain GET and one over TLS
                                 # against the IDF certificate bundle.

@@ -9,6 +9,7 @@
 #include "esp_log.h"
 
 #include "ngl.h"
+#include "neos_midi.h"
 #include "neos_net.h"
 #include "neos_sock.h"
 #include "neos_orient.h"
@@ -415,6 +416,28 @@ static esp_elf_symbol_table_t neos_syscalls[] = {
     ESP_ELFSYM_EXPORT(neos_weather),
     ESP_ELFSYM_EXPORT(neos_weather_refresh),
     ESP_ELFSYM_EXPORT(neos_weather_fetching),
+
+    /*
+     * USB MIDI, on the USB-A socket.
+     *
+     * The one place the ABI hands over a driver rather than a primitive, and
+     * the reason is in neos_midi.h: there is one root port, so a stack per app
+     * is two stacks fighting over one controller. What crosses the line is the
+     * 4-byte event packet the wire actually carries, which is small enough
+     * that nothing about the device is decided on this side - the Launchpad
+     * protocol lives in apps/common/launchpad, where an app can change it.
+     */
+    ESP_ELFSYM_EXPORT(neos_midi_open),
+    ESP_ELFSYM_EXPORT(neos_midi_close),
+    ESP_ELFSYM_EXPORT(neos_midi_state),
+    ESP_ELFSYM_EXPORT(neos_midi_state_name),
+    ESP_ELFSYM_EXPORT(neos_midi_device),
+    ESP_ELFSYM_EXPORT(neos_midi_send),
+    ESP_ELFSYM_EXPORT(neos_midi_send_sysex),
+    ESP_ELFSYM_EXPORT(neos_midi_recv),
+    ESP_ELFSYM_EXPORT(neos_midi_pending),
+    ESP_ELFSYM_EXPORT(neos_midi_drain),
+    ESP_ELFSYM_EXPORT(neos_midi_overruns),
 
     /* power */
     ESP_ELFSYM_EXPORT(neos_power_read),

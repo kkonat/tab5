@@ -43,7 +43,7 @@ if (-not $Drive) { $Drive = Get-NeosSetting 'NEOS_CARD_DRIVE' 'G:' }
 # What goes on a card, by app directory name. A list and not a scan of apps/,
 # because which of the published apps a card carries is a choice.
 $names = @('launcher', 'hello', 'matrix', 'system', 'mandel', 'clock', 'nupogodi',
-           'lanscan', 'synth1', 'moog')
+           'lanscan', 'synth1', 'moog', 'miditest')
 
 # lab/ is different, and is taken whole. It is the private repo of apps still
 # being worked on - gitignored here, and absent from most checkouts. An app is

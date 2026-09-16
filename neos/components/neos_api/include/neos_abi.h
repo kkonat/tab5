@@ -42,7 +42,7 @@
 #include <stdint.h>
 
 #define NEOS_ABI_MAJOR 1
-#define NEOS_ABI_MINOR 23
+#define NEOS_ABI_MINOR 24
 
 /*
  * Every minor of the current major, oldest first.
@@ -84,7 +84,8 @@
     X(1, 20)              \
     X(1, 21)              \
     X(1, 22)              \
-    X(1, 23)
+    X(1, 23)              \
+    X(1, 24)
 
 #define NEOS_ABI_CAT_(maj, min) neos_abi_##maj##_##min
 #define NEOS_ABI_SYM_(maj, min) NEOS_ABI_CAT_(maj, min)

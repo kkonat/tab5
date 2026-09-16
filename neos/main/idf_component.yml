@@ -9,8 +9,14 @@ dependencies:
   espressif/esp_wifi_remote: "~1.4"
   # The BSP pulls espressif/usb (for the UVC camera). Every 1.x release we can
   # resolve declares idf>=5.4 but calls usb_dwc_hal functions that do not exist
-  # until a later IDF, so it will not compile on 5.4.2. Nothing here uses USB,
-  # so point the dependency at the IDF's own usb component instead.
+  # until a later IDF, so it will not compile on 5.4.2. Point the dependency at
+  # the IDF's own usb component instead.
+  #
+  # neos_midi.c does use it now - it is a USB MIDI host class driver on the
+  # USB-A socket - and it is written against the IDF's API, which is the half
+  # of espressif/usb that both versions agree on. What the managed component
+  # adds on top is the device stack, and nothing here wants that: the USB-C
+  # socket is the programming port.
   #
   # $IDF_PATH is expanded by the component manager when the path is resolved,
   # not when the manifest is parsed, so this follows whichever IDF is exported
