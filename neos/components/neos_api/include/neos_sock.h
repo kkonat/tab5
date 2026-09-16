@@ -3,9 +3,11 @@
  *
  * neos_net.h is about the connection - which network the tablet is on, and
  * who decides. This file is about what an app may put on it once NeOS has
- * one: a small, IPv4-only, always-non-blocking socket surface, plus the two
- * things below the transport that a program looking at a LAN cannot work
- * without - our own address and mask, and the neighbour cache.
+ * one: a small, IPv4-only, always-non-blocking socket surface, the name
+ * lookup that every connection starts with, TLS for the hosts that will not
+ * talk without it, and the two things below the transport that a program
+ * looking at a LAN cannot work without - our own address and mask, and the
+ * neighbour cache.
  *
  * Why this is here at all, when neos_weather.h argues the opposite way about
  * HTTP: the weather is one fact about one place, so two apps fetching it
@@ -192,6 +194,163 @@ int neos_sock_set(int fd, int option, uint32_t value);
  * at the top about why there are none here that do not have to be.
  */
 int neos_sock_join(int fd, uint32_t group, uint32_t iface_ip);
+
+/* ------------------------------------------------------------------ */
+/* Names                                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The step between a URL and a socket, and the one thing above the transport
+ * that is here rather than in the app.
+ *
+ * It is here because it was being written twice. lanscan carried four hundred
+ * lines of RFC 1035 to turn addresses back into names, and radio carried
+ * three hundred more to go the other way - both of them parsing the same
+ * record format, over the same UDP socket, against the same resolver, while
+ * the stack underneath already held a DNS client with a cache that neither
+ * could see. Two apps asking about the same host both went to the wire, and a
+ * third app would have written it a third time.
+ *
+ * That is the test this crosses and neos_weather.h's HTTP does not. A resolver
+ * is not a policy about what an app may reach - it cannot be, since the app
+ * already has the socket and could send the query itself - it is the same
+ * question asked in the same way by everything that opens a connection, and
+ * the answer is already in the machine.
+ *
+ * Non-blocking, like everything else here. The first call starts a lookup and
+ * usually returns NEOS_SOCK_PENDING; ask again with the same name until it
+ * gives you NEOS_SOCK_OK or NEOS_SOCK_ERR. A name the stack has already
+ * looked up recently, and a dotted quad, come back OK on the first call
+ * without a packet being sent - so there is no need for an app to special
+ * case either.
+ *
+ * The name is the key, so calls about different hosts may be in flight at
+ * once and interleaved freely. NEOS_RESOLVE_SLOTS is how many; asking about
+ * one more than that returns NEOS_SOCK_ERR rather than queueing, for the
+ * reason NEOS_SOCK_BUDGET gives.
+ *
+ * An abandoned lookup is not a leak. A slot nobody comes back for is reclaimed
+ * once it has been sitting there long enough to be forgotten about, so an app
+ * that gives up on a station and never asks again costs nothing.
+ */
+
+/** Longest hostname this will take. Longer is NEOS_SOCK_ERR, not truncation. */
+#define NEOS_HOST_MAX      128
+
+/** How many lookups may be in flight at once, across all apps. */
+#define NEOS_RESOLVE_SLOTS   4
+
+/**
+ * Turn @p host into an address.
+ *
+ * @param host  a hostname, or a dotted quad
+ * @param ip    filled in host byte order on NEOS_SOCK_OK, untouched otherwise
+ * @return NEOS_SOCK_OK, NEOS_SOCK_PENDING - ask again - or NEOS_SOCK_ERR,
+ *         which covers "no such host", "no resolver", and "no room to ask".
+ */
+int neos_resolve(const char *host, uint32_t *ip);
+
+/* ------------------------------------------------------------------ */
+/* TLS                                                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A connection nobody in the middle can read, for the hosts that will not
+ * talk any other way.
+ *
+ * This is the one thing in this file that is not a thin rename of an lwIP
+ * call, and it is here for the reason the rest of the file is not: an app
+ * cannot do it for itself. A socket it can have, and a resolver is a
+ * convenience - but TLS is mbedTLS, a certificate bundle and a few hundred
+ * kilobytes of code, and an app links -nostdlib against a syscall table and
+ * is fifty kilobytes all in. There is no version of this an app writes.
+ *
+ * The firmware already had all of it. The weather fetch has been going out
+ * over TLS against the IDF certificate bundle since there was a weather
+ * fetch; what was missing was a door. So this adds no certificates, no
+ * library and no flash - only a way to reach what is already on the tablet.
+ *
+ * What it is NOT is HTTP. neos_weather.h argues that HTTP and JSON belong in
+ * the firmware because the weather is one fact that two apps could disagree
+ * about, and that argument is untouched here: this is a byte stream, the same
+ * shape as a socket, and what an app puts through it is the app's business.
+ * A radio streaming MP3 and a client speaking some protocol nobody has
+ * written yet want the same thing from this.
+ *
+ * Non-blocking like everything else, and driven the same way a connect is:
+ * open, then ask neos_tls_status() until it stops saying PENDING. The name
+ * is looked up, the socket is dialled and the handshake is done inside those
+ * calls, so an app that already knows how to wait for a connect knows how to
+ * wait for this.
+ *
+ * The one asymmetry worth knowing: the socket underneath belongs to the TLS
+ * session and not to the app. neos_tls_fd() hands it over for the length of
+ * a neos_sock_wait() and nothing else - an app that reads, writes or closes
+ * it directly is an app that has torn the session it was waiting on.
+ */
+
+/** How many TLS sessions an app may hold at once, across all apps.
+ *
+ *  Small, and for a reason that is measured rather than chosen: a session is
+ *  a 16 KB input buffer, a 4 KB output buffer and an mbedTLS context, about
+ *  thirty kilobytes of internal RAM that the framebuffer and the Wi-Fi stack
+ *  also want. Two is what the tablet can spare without anybody noticing.
+ */
+#define NEOS_TLS_BUDGET  2
+
+/**
+ * Open a TLS connection to @p host.
+ *
+ * @return a handle (>0), or NEOS_SOCK_ERR if there is no free session, no
+ *         memory, or the name is too long.
+ *
+ * Returns as soon as the session is claimed; nothing has been dialled yet.
+ * Drive it with neos_tls_status().
+ *
+ * The certificate is checked against the IDF bundle, and the name is used for
+ * SNI as well as for that check - which is why this takes a hostname where
+ * neos_sock_connect() takes an address. There is no way to ask it not to
+ * check: a TLS session that does not verify anybody is a more expensive
+ * socket, and this API would rather not offer one.
+ */
+int neos_tls_open(const char *host, uint16_t port);
+
+/**
+ * How the connection is coming along: NEOS_SOCK_OK once it is ready to carry
+ * bytes, NEOS_SOCK_PENDING while the lookup, the dial or the handshake is
+ * still going, NEOS_SOCK_ERR if it will not happen.
+ *
+ * This is what advances it, so it has to be called until it answers. Each
+ * call does whatever can be done without waiting and returns - though a
+ * handshake is arithmetic as well as packets, so a call that lands on one of
+ * the key exchange steps costs a few milliseconds of it.
+ */
+int neos_tls_status(int handle);
+
+/** Send. Bytes written, NEOS_SOCK_AGAIN, or NEOS_SOCK_ERR. */
+int neos_tls_send(int handle, const void *buf, int len);
+
+/** Receive. Bytes read, 0 at end of stream, NEOS_SOCK_AGAIN, or
+    NEOS_SOCK_ERR - the same convention neos_sock_recv() uses. */
+int neos_tls_recv(int handle, void *buf, int len);
+
+/**
+ * The socket underneath, to put in a neos_sock_wait(), or NEOS_SOCK_ERR
+ * before there is one.
+ *
+ * Borrowed, not given: see the note above. It exists because the alternative
+ * was a neos_tls_wait() that did what neos_sock_wait() already does, and an
+ * app with one plain socket and one TLS session would then have had to wait
+ * on them in two different calls.
+ *
+ * Readable does not mean there is application data - a record may decrypt to
+ * nothing but a handshake message - so neos_tls_recv() can still answer
+ * NEOS_SOCK_AGAIN on a socket that just woke the wait up.
+ */
+int neos_tls_fd(int handle);
+
+/** Close the session and the socket under it. Safe on an invalid handle. */
+void neos_tls_close(int handle);
 
 /* ------------------------------------------------------------------ */
 /* Where we are on it                                                  */

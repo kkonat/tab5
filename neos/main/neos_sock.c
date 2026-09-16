@@ -456,3 +456,212 @@ bool neos_neigh_ask(uint32_t ip)
     }
     return job.asked;
 }
+
+/* ------------------------------------------------------------------ */
+/* Names                                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * neos_resolve(), over lwIP's own DNS client.
+ *
+ * The awkward part is that dns_gethostbyname() is not a blocking call with a
+ * return value - it answers immediately when it can, and otherwise promises a
+ * callback later, on the tcpip task. So this is a small table of lookups in
+ * flight, written by that callback and read by whichever app task asked, with
+ * the name as the key so two apps asking about the same host share one entry
+ * rather than racing.
+ *
+ * The lwIP call itself belongs to the tcpip task - core locking is off in this
+ * build - so it goes through esp_netif_tcpip_exec() like the ARP calls above.
+ * Unlike those it does not wait for an answer, only for the question to be
+ * asked, which is a context switch each way and happens once per connection.
+ *
+ * What is deliberately not here is a cache. lwIP already keeps one, sized by
+ * CONFIG_LWIP_DNS_MAX_HOST_IP and shared with SNTP and the weather; a second
+ * one in front of it would be two sets of expiry rules disagreeing about the
+ * same names. A slot here lives only as long as the lookup it is tracking.
+ */
+
+#include "lwip/dns.h"
+
+#include "esp_timer.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+typedef enum {
+    SLOT_FREE = 0,
+    SLOT_PENDING,
+    SLOT_DONE,
+    SLOT_FAIL,
+} slot_state_t;
+
+typedef struct {
+    char         name[NEOS_HOST_MAX];
+    uint32_t     ip;              /* host order, when SLOT_DONE */
+    slot_state_t state;
+    int64_t      touched_us;      /* when the state last changed */
+} resolve_slot_t;
+
+static resolve_slot_t s_resolve[NEOS_RESOLVE_SLOTS];
+static portMUX_TYPE   s_resolve_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/*
+ * How long a lookup nobody collects is kept.
+ *
+ * Two different jobs, one number. A PENDING slot should never last this long -
+ * lwIP gives up on its own well inside it - so reaching it means a callback
+ * that is not coming, and the slot has to be reclaimed or the table fills up
+ * for the rest of the boot. A finished slot is held this long so that an app
+ * polling at any sane rate still finds its answer, and no longer, because the
+ * answer is lwIP's to remember and not ours.
+ */
+#define RESOLVE_TTL_US  (20 * 1000 * 1000)
+
+/* Called on the tcpip task. `ipaddr` is NULL when the lookup failed. */
+static void resolve_done(const char *name, const ip_addr_t *ipaddr, void *arg)
+{
+    resolve_slot_t *slot = (resolve_slot_t *)arg;
+
+    portENTER_CRITICAL(&s_resolve_lock);
+    /*
+     * The slot may have been reclaimed and handed to a different name while
+     * this lookup was outstanding, so the name is checked and not assumed.
+     * Without it a late answer for a station nobody is listening to would be
+     * written over the answer for one that is.
+     */
+    if (slot->state == SLOT_PENDING && strcmp(slot->name, name) == 0) {
+        if (ipaddr && IP_IS_V4(ipaddr)) {
+            slot->ip    = lwip_ntohl(ip4_addr_get_u32(ip_2_ip4(ipaddr)));
+            slot->state = slot->ip ? SLOT_DONE : SLOT_FAIL;
+        } else {
+            slot->state = SLOT_FAIL;
+        }
+        slot->touched_us = esp_timer_get_time();
+    }
+    portEXIT_CRITICAL(&s_resolve_lock);
+}
+
+typedef struct {
+    resolve_slot_t *slot;
+    err_t           err;
+    uint32_t        ip;
+} resolve_job_t;
+
+static esp_err_t resolve_ask(void *ctx)
+{
+    resolve_job_t *job = (resolve_job_t *)ctx;
+
+    ip_addr_t addr;
+    job->err = dns_gethostbyname(job->slot->name, &addr, resolve_done, job->slot);
+
+    /* ERR_OK means it was answered out of lwIP's cache, or the name was a
+       dotted quad - either way there is nothing to wait for. */
+    if (job->err == ERR_OK && IP_IS_V4(&addr)) {
+        job->ip = lwip_ntohl(ip4_addr_get_u32(ip_2_ip4(&addr)));
+    }
+    return ESP_OK;
+}
+
+/* Throw away anything nobody came back for. Called under the lock. */
+static void resolve_sweep(int64_t now)
+{
+    for (int i = 0; i < NEOS_RESOLVE_SLOTS; i++) {
+        if (s_resolve[i].state != SLOT_FREE &&
+            now - s_resolve[i].touched_us > RESOLVE_TTL_US) {
+            s_resolve[i].state = SLOT_FREE;
+        }
+    }
+}
+
+int neos_resolve(const char *host, uint32_t *ip)
+{
+    if (!host || !*host || strlen(host) >= NEOS_HOST_MAX) {
+        return NEOS_SOCK_ERR;
+    }
+
+    const int64_t now = esp_timer_get_time();
+
+    /* --- is this one already in flight, or already answered? --- */
+    portENTER_CRITICAL(&s_resolve_lock);
+    resolve_sweep(now);
+
+    resolve_slot_t *slot = NULL;
+    for (int i = 0; i < NEOS_RESOLVE_SLOTS; i++) {
+        if (s_resolve[i].state != SLOT_FREE &&
+            strcmp(s_resolve[i].name, host) == 0) {
+            slot = &s_resolve[i];
+            break;
+        }
+    }
+
+    if (slot) {
+        const slot_state_t state = slot->state;
+        const uint32_t     found = slot->ip;
+        if (state != SLOT_PENDING) {
+            slot->state = SLOT_FREE;        /* collected; the answer is lwIP's
+                                               to remember from here */
+        }
+        portEXIT_CRITICAL(&s_resolve_lock);
+
+        if (state == SLOT_PENDING) {
+            return NEOS_SOCK_PENDING;
+        }
+        if (state == SLOT_DONE) {
+            if (ip) {
+                *ip = found;
+            }
+            return NEOS_SOCK_OK;
+        }
+        return NEOS_SOCK_ERR;
+    }
+
+    /* --- a new one --- */
+    for (int i = 0; i < NEOS_RESOLVE_SLOTS; i++) {
+        if (s_resolve[i].state == SLOT_FREE) {
+            slot = &s_resolve[i];
+            break;
+        }
+    }
+    if (!slot) {
+        portEXIT_CRITICAL(&s_resolve_lock);
+        return NEOS_SOCK_ERR;       /* every slot busy - see NEOS_RESOLVE_SLOTS */
+    }
+
+    /* Claimed before the lock is dropped, so two tasks asking at once cannot
+       take the same one. */
+    strlcpy(slot->name, host, sizeof(slot->name));
+    slot->ip         = 0;
+    slot->state      = SLOT_PENDING;
+    slot->touched_us = now;
+    portEXIT_CRITICAL(&s_resolve_lock);
+
+    resolve_job_t job = { .slot = slot, .err = ERR_VAL, .ip = 0 };
+    if (esp_netif_tcpip_exec(resolve_ask, &job) != ESP_OK) {
+        portENTER_CRITICAL(&s_resolve_lock);
+        slot->state = SLOT_FREE;
+        portEXIT_CRITICAL(&s_resolve_lock);
+        return NEOS_SOCK_ERR;
+    }
+
+    if (job.err == ERR_INPROGRESS) {
+        return NEOS_SOCK_PENDING;       /* the callback will finish it */
+    }
+
+    /*
+     * Answered on the spot, or refused on the spot. Either way the callback is
+     * not coming and the slot goes back now - which is what makes a cached
+     * name, and a literal address, cost one call and no packets.
+     */
+    portENTER_CRITICAL(&s_resolve_lock);
+    slot->state = SLOT_FREE;
+    portEXIT_CRITICAL(&s_resolve_lock);
+
+    if (job.err == ERR_OK && job.ip != 0) {
+        if (ip) {
+            *ip = job.ip;
+        }
+        return NEOS_SOCK_OK;
+    }
+    return NEOS_SOCK_ERR;
+}

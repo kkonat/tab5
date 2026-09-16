@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "com.kk.moog",
+  "name": "Moog",
+  "description": "a Minimoog Model D - two pages of panel over a touch keyboard",
+  "version": "0.1.0",
+  "type": "elf",
+  "entry": "app.elf",
+  "category": "Sound",
+  "icon": "icon.png",
+  "api": 2
+}

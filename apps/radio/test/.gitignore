@@ -1,0 +1,6 @@
+# The host test binary, and the MP3 fixtures run.sh makes with ffmpeg. Neither
+# is source: the fixtures are two seconds of a sine wave and are regenerated
+# on demand, which is cheaper than carrying audio files in a source tree.
+test_radio
+test_radio.exe
+*.mp3

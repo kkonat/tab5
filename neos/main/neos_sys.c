@@ -753,11 +753,23 @@ int neos_backlight(void)
     return s_backlight;
 }
 
+/*
+ * Zero is not a brightness, it is the screen being asleep.
+ *
+ * Kept apart from s_backlight so that the two questions stay separate: what the
+ * user set the brightness to, and whether the panel is currently showing
+ * anything. A sleep that wrote 0 into the setting would come back from the next
+ * reboot with an invisible screen and a slider that agreed with it.
+ */
+static bool s_blanked;
+
 static bool backlight_apply(int percent, bool save)
 {
     if (percent < BACKLIGHT_MIN) { percent = BACKLIGHT_MIN; }
     if (percent > 100)           { percent = 100; }
-    if (bsp_display_brightness_set(percent) != ESP_OK) {
+    /* While blanked the value is remembered and not applied - it is what the
+       screen comes back to, not what it is doing now. */
+    if (!s_blanked && bsp_display_brightness_set(percent) != ESP_OK) {
         return false;
     }
     s_backlight = percent;
@@ -775,6 +787,23 @@ static bool backlight_apply(int percent, bool save)
 bool neos_backlight_set(int percent)
 {
     return backlight_apply(percent, true);
+}
+
+bool neos_backlight_blank(bool blank)
+{
+    if (blank == s_blanked) {
+        return true;
+    }
+    if (bsp_display_brightness_set(blank ? 0 : s_backlight) != ESP_OK) {
+        return false;
+    }
+    s_blanked = blank;
+    return true;
+}
+
+bool neos_backlight_blanked(void)
+{
+    return s_blanked;
 }
 
 /* ------------------------------------------------------------------ */

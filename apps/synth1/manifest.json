@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "com.kk.synth1",
+  "name": "Synth1",
+  "description": "monophonic oscillator with a modulation LFO - a test of the audio loop",
+  "version": "0.1.0",
+  "type": "elf",
+  "entry": "app.elf",
+  "category": "Sound",
+  "icon": "icon.png",
+  "api": 2
+}

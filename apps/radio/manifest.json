@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "id": "com.kk.radio",
+  "name": "Radio",
+  "description": "internet radio, with a deck to watch it on",
+  "version": "0.1.0",
+  "type": "elf",
+  "entry": "app.elf",
+  "category": "Sound",
+  "api": 2
+}

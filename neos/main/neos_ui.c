@@ -48,8 +48,9 @@ static void run_panel(neos_panel_t which)
     s_active = true;
 
     switch (which) {
-    case NEOS_PANEL_WIFI:  neos_panel_wifi();  break;
-    case NEOS_PANEL_CLOCK: neos_panel_clock(); break;
+    case NEOS_PANEL_WIFI:    neos_panel_wifi();    break;
+    case NEOS_PANEL_CLOCK:   neos_panel_clock();   break;
+    case NEOS_PANEL_BATTERY: neos_panel_battery(); break;
     default: break;
     }
 

@@ -33,6 +33,7 @@
 #include "neos_audio.h"
 #include "neos_bar.h"
 #include "neos_boot.h"
+#include "neos_screen.h"
 #include "neos_touch.h"
 #include "neos_ui.h"
 
@@ -40,6 +41,16 @@ static const char *TAG = "touch";
 
 #define POLL_MS      20     /* 50 Hz: a modifier key has to feel held, not sampled */
 #define TAP_SLOP_PX  24     /* a finger rolls this much on a deliberate tap */
+
+/*
+ * And how often a sleeping tablet is asked.
+ *
+ * The panel is dark, so nothing on the glass is aimed at anything: the only
+ * question left is whether a finger has arrived, and 8 Hz answers it inside the
+ * time it takes to put a finger down. It is the one real CPU saving sleep has -
+ * fifty polls a second of an I2C part that nobody is watching.
+ */
+#define SLEEP_POLL_MS 120
 
 static esp_lcd_touch_handle_t s_tp;
 
@@ -121,6 +132,9 @@ static bool bar_took_it(int16_t x, int16_t y)
     case NEOS_BAR_CLOCK:
         neos_ui_open(NEOS_PANEL_CLOCK);
         return true;
+    case NEOS_BAR_BATTERY:
+        neos_ui_open(NEOS_PANEL_BATTERY);
+        return true;
     default:
         return false;
     }
@@ -151,7 +165,7 @@ static bool bar_took_it(int16_t x, int16_t y)
 #define ESCAPE_FINGERS 4
 #define ESCAPE_MS    800
 
-static void escape_watch(int n)
+static void escape_watch(int n, uint32_t poll_ms)
 {
     static uint32_t held_ms;
 
@@ -159,7 +173,7 @@ static void escape_watch(int n)
         held_ms = 0;
         return;
     }
-    held_ms += POLL_MS;
+    held_ms += poll_ms;
     if (held_ms < ESCAPE_MS) {
         return;
     }
@@ -175,12 +189,47 @@ static void touch_task(void *arg)
     (void)arg;
     bool was_down = false;
 
+    /*
+     * The press that wakes the screen is not a press on anything.
+     *
+     * Whatever was on the glass when it went dark is still there, and the first
+     * thing a user does to a sleeping tablet is touch it somewhere - which on a
+     * settings page is a switch and in a game is a control. So a press that
+     * arrives while the screen is off wakes it and is then held back: no click,
+     * no tap, and no coordinates for anyone, until the finger comes off again.
+     */
+    bool swallow = false;
+
     for (;;) {
+        const uint32_t poll_ms = neos_screen_is_off() ? SLEEP_POLL_MS : POLL_MS;
+
         int16_t xs[NEOS_TOUCH_MAX], ys[NEOS_TOUCH_MAX];
         const int n = read_points(xs, ys);
         const bool down = n > 0;
 
-        escape_watch(n);
+        escape_watch(n, poll_ms);
+
+        if (down && !was_down && neos_screen_is_off()) {
+            neos_screen_on();
+            swallow = true;
+        }
+
+        if (swallow) {
+            /*
+             * Nothing published for the whole life of that press, its release
+             * included - an app polling neos_touch() must not see the finger
+             * that woke the screen, and the release must not become a tap.
+             * Coming off the glass is what ends it.
+             */
+            s_n = 0;
+            s_down = down;
+            was_down = down;
+            if (!down) {
+                swallow = false;
+            }
+            vTaskDelay(pdMS_TO_TICKS(poll_ms));
+            continue;
+        }
 
         if (down) {
             for (int i = 0; i < n; i++) {
@@ -193,6 +242,9 @@ static void touch_task(void *arg)
             if (!was_down) {
                 s_press_x = xs[0];
                 s_press_y = ys[0];
+                /* The user is here. Everything else about sleeping is a timer;
+                   this is the one thing that resets it. */
+                neos_idle_poke();
                 /*
                  * The click is on the press, not on the tap. A key that
                  * clicked when the finger came off would feel like it was
@@ -218,7 +270,7 @@ static void touch_task(void *arg)
 
         s_down = down;
         was_down = down;
-        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
     }
 }
 
